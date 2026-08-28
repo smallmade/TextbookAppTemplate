@@ -63,6 +63,7 @@ SPEC_SKELETON = {
     },
     "sources": [
         {
+            # key 用角色名，不要用作者姓氏——字段剥干净不等于内容剥干净
             "key": "primary-textbook",
             "author": "TODO",
             "title": "TODO",
