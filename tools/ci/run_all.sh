@@ -43,6 +43,9 @@ PKG="$(find "$P/src" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
 [ -n "$PKG" ] && run "零依赖纪律" "不变量1,2" bash "$CI/check_kernel_purity.sh" "$PKG" \
               || skip "零依赖纪律" "不变量1,2" "没有 src/<包>"
 
+run "充分性判据" "Gate 02" python3 "$CI/check_sufficiency.py" "$P"
+run "输入格式矩阵" "Gate 02" python3 "$CI/check_input_matrix.py" "$P"
+
 SWIFT="$(find "$P/swift/Sources" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | grep -v App | grep -v Verify | head -1)"
 if [ -n "$PKG" ] && [ -n "$SWIFT" ]; then
     run "对等测试" "Gate 05" python3 "$CI/check_port_coverage.py" --python "$PKG" --swift "$SWIFT"
@@ -70,6 +73,8 @@ for pkgfile in "$P"/dist/*.pkg "$P"/dist/*.ipa; do
 done
 ls "$P"/dist/*.pkg "$P"/dist/*.ipa >/dev/null 2>&1 || \
     skip "二进制卫生" "Gate S" "dist/ 里还没有包（阶段 08 之前正常）"
+
+run "许可审计" "Gate 09" python3 "$CI/audit_licences.py" "$P/dist"
 
 echo
 echo "${BOLD}通过 $PASS   未通过 $FAILED   跳过 $SKIP${OFF}"

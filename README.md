@@ -39,8 +39,9 @@ bash tools/ci/run_all.sh <项目目录>
 | 检查 | 闸门 | 守的是 |
 |---|---|---|
 | `check_spec.py` | Gate 01 | 正典合法、citation 精确到式号、每个符号有释义 |
-| `check_sufficiency.py` | Gate 02 | 七条充分性判据 |
-| `check_input_matrix.py` | Gate 02 | 换行符 · 编码 · 分隔 · 数值格式矩阵 |
+| `check_sufficiency.py` | Gate 02 | 七条充分性判据 + **黄金律**（层 2 生成脚本不得 import 核心） |
+| `make_input_matrix.py` | Gate 02 | 生成格式矩阵 fixture（成对覆盖 + 已知致命组合） |
+| `check_input_matrix.py` | Gate 02 | 矩阵齐备 · fixture 未被 git 改坏 · **读取器实测** |
 | `check_kernel_purity.sh` | 不变量 1、2 | kernel 零依赖；四层不含平台代码 |
 | `check_port_coverage.py` | Gate 05 | 对等测试，五层全覆盖，自动探索 |
 | `check_legal_isolation.sh` | Gate 06 | 界面层无教材标识、无物理常数 |
@@ -75,6 +76,48 @@ bash tools/ci/run_all.sh <项目目录>
 > **凡是「没找到问题就算通过」的检查，都必须有一个已知会失败的样本证明它
 > 真的在工作。** 一道静默放行的闸门比没有闸门更糟：没有闸门时你至少知道
 > 自己没检查。而一道会乱叫的闸门，两天之内就会被关掉。
+
+---
+
+### fixture 目录约定
+
+`check_sufficiency.py` 要知道「哪个 fixture 属于哪个 module、哪一层」。约定
+用目录编码——目录是文件系统里唯一不会和内容不同步的元数据：
+
+```
+tests/data/
+  layer1-printed/<module_id>[-<suffix>].csv      层 1 印刷表格（4 位）
+  layer2-highprec/<module_id>[-<suffix>].csv     层 2 高精度（20 位）
+  layer2-highprec/generate_<module_id>.py        层 2 的生成脚本
+  layer3-symbolic/<module_id>[-<suffix>].py      层 3 符号验证
+  layer5-secondsource/<module_id>[-<suffix>].csv 层 5 独立第二源
+  matrix/                                        输入格式矩阵（自动生成）
+  examples/<module_id>.csv                       教材章内例题
+  SOURCE.md                                      联网 fixture 的留证
+```
+
+层 4 不放 fixture——它由正典的 invariants / trends / boundaries 自动派生。
+
+### 三件容易被忽略、但这批闸门专门守的事
+
+**黄金律。** 层 2 的生成脚本一旦 `import` 了核心，那一层就变成自证——用被测
+程序生成参考值，测试永远绿灯却什么都没证明。`check_sufficiency.py` 解析
+每个 `generate_*.py` 的 AST，import 到核心包就直接失败。
+
+**git 会毁掉 CRLF fixture。** `core.autocrlf` 与 `text=auto` 会在检出时把 CRLF
+规范化成 LF——**一个专门用来测 CRLF 的 fixture 被改成 LF，测试照样绿灯，而
+缺陷原样还在。** 所以项目根要有：
+
+```
+tests/data/matrix/** -text -diff
+```
+
+`check_input_matrix.py` 会逐字节比对并核对这一行在不在。
+
+**不可表示的组合不该生成。** U+2028 在 Latin-1 里根本不存在。第一版用
+`errors="replace"` 把它换成了 `?`，生成出一个本身就无效的 fixture，然后要求
+读取器把它解析成 6 行——读取器怎么做都是错的。**一个不该存在的测试用例，比
+没有测试用例更糟。** 现在这类组合直接剔除并报出来。
 
 ---
 

@@ -19,7 +19,9 @@ from pathlib import Path
 # 这张表随项目增长——每加一部教材就把作者姓氏加进来。
 TEXTBOOK_MARKS = re.compile(
     r"\b(anderson|gere|hibbeler|cengel|moran|incropera|timoshenko|white|"
-    r"munson|turns|law|roark)\b|"
+    r"munson|turns|law|roark|"
+    # 结构力学四部主教材（StructureOne，2026-08）
+    r"durka|morgan|williams|bucciarelli|olsson|dahlblom|chajes|kollar|springer)\b|"
     r"(Eq\.\s*\d|Example\s+\d|Problem\s+\d|Table\s+\d+-|§\s*\d)",
     re.IGNORECASE,
 )
