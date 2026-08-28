@@ -1,0 +1,13 @@
+# 构建产物。递归匹配——单层 * 不跨目录分隔符，这个坑已经踩过两次：
+# 一次是 uploads/old/ 里的 .pkg，一次是 engkit/swift/.build/ 整棵树。
+**/.build/
+**/build/
+**/dist/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Xcode
+**/*.xcuserdatad/
+**/DerivedData/
