@@ -30,7 +30,26 @@ python3 tools/new_app.py --slug thermo --core ThermoKit --title "Steam Tables �
 
 ---
 
-## 十二项闸门
+## 工具链只有一份真身
+
+各项目的 `tools/ci` 是**指向本仓库的符号链接**，不是副本：
+
+```bash
+ln -sfn ../../TextbookAppTemplate/tools/ci "<项目>/tools/ci"
+bash tools/ci/check_no_drift.sh <APP-Development 目录>    # 守着它还是链接
+```
+
+**为什么要有这条规矩。** 2026-08-29 的实况：五个 Claude Code 会话同时写同一个
+Google Drive 文件夹，四个项目各持一份 `tools/ci` 副本。副本里有两项真改进
+（docstring 误报的两处修复、出货副本双复查），也有三份已经过期的旧版——
+**而没有任何东西在看这件事**，直到有人问「strip_spec.py 从哪来」才发现。
+
+**要改工具：改这里的真身，别在项目里就地改。** 真要就地试，试完提升回模板再
+把链接接回去——沉淀不回去的改进，下一个项目享受不到，而且会静默过期。
+
+---
+
+## 十四项闸门
 
 ```bash
 bash tools/ci/run_all.sh <项目目录>
@@ -50,7 +69,10 @@ bash tools/ci/run_all.sh <项目目录>
 | `check_screenshots.py` | Gate 07 | ASC 实测尺寸 |
 | `check_urls.sh` | Gate 07 | 站点五个 URL 回 200 |
 | `check_plists.sh` | Gate 08 | plist 规范化 + 严格解析 |
-| `audit_licences.py` | Gate 09 | 无 GPL-only 组件 |
+| `strip_spec.py` | Gate 01/06 | 产出出货副本 + 剥完后按内容回扫 |
+| `check_ship_isolation.py` | Gate 06 | 独立复查出货副本的**每一个字符串** |
+| `audit_licences.py` | Gate 09 | 无 GPL-only 组件；LGPL 三项条件 |
+| `check_no_drift.sh` | — | 工具链未分叉 |
 
 ### 退出码约定
 

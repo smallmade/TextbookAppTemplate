@@ -21,10 +21,19 @@ FAIL=0
 #
 # 版本号要写进模式：PySide 与 6 之间没有词边界，(PySide|...)\b 匹配不上
 # `from PySide6 import QtCore`。这一条是被自己咬过才发现的——见下面的双向自检。
-IMPORT='^[[:space:]]*(import|from)[[:space:]]+'
+# `from` 后面必须跟一个合法模块名，`from X` 后面必须跟 ` import `。
+# 少了这一条，docstring 里一句折行后以 from 开头的散文就会被判成 import——
+# StructureOne 的 kernel 上真的发生过，那一行是：
+#     from :func:`principal_angle` is meaningless rather than merely imprecise.
+# 这是第二次栽在「行级 grep 看不见 docstring」上，第一次是 ui 层那句
+# 「这一层不 import 任何 GUI 库」。行级检查看不到语法，只能把模式收紧到
+# 语法本身：from 之后必须是模块名，且必须跟一个 import。
+MODNAME='[A-Za-z_][A-Za-z0-9_.]*'
+IMPORT="^[[:space:]]*(import[[:space:]]+${MODNAME}|from[[:space:]]+[.]*${MODNAME}[[:space:]]+import[[:space:]])"
 LIBS='(PySide[0-9]*|PyQt[0-9]*|SwiftUI|UIKit|AppKit|tkinter)'
-PLATFORM="${IMPORT}(${LIBS}|pathlib|subprocess|requests|urllib|os)([.,[:space:]]|$)"
-UI_PATTERN="${IMPORT}${LIBS}([.,[:space:]]|$)"
+IMPORT_HEAD='^[[:space:]]*(import|from)[[:space:]]+'
+PLATFORM="${IMPORT_HEAD}(${LIBS}|pathlib|subprocess|requests|urllib|os)([.,[:space:]]|$)"
+UI_PATTERN="${IMPORT_HEAD}${LIBS}([.,[:space:]]|$)"
 
 # 双向自检。单向不够：第一版只验了「抓得到违规」，于是漏掉了反方向的错，
 # 静默放行了一个真违规。两个方向都要验。
@@ -51,13 +60,50 @@ selftest() {
     return 0
 }
 
+# 排除模式不能用 ^ 锚定：grep -rn 的输出带 `文件名:行号:` 前缀，
+# 锚在行首的模式永远匹配不到那之后的 import。用 : 开头接受这个前缀。
+# 允许集照抄已上架的 GasDyn 的 AST 版纪律测试：math、enum、__future__、
+# 以及本包自身（相对或绝对都算）。
+#
+# 这一版之前只允许 math 与相对 import，拿去跑已上架的 GasDyn 会报七条
+# 违规，而那七条全是对的写法：`import enum`（给流态枚举用）与
+# `from gasdyn.kernel import isentropic`（同层兄弟模块）。
+# **一个会对已知正确的代码报红的闸门，就是一个即将被关掉的闸门。**
+PKGNAME="$(basename "$PKG")"
+ALLOWED=":[[:space:]]*(import|from)[[:space:]]+(math([[:space:]]|$)|enum([[:space:]]|$)|__future__[[:space:]]|${PKGNAME}[.[:space:]]|\\.)"
+
+# kernel 侧的双向自检。两个方向都要验，理由与上面那条一致。
+kernel_selftest() {
+    local T; T="$(mktemp -d)"
+    printf 'import numpy as np\n' > "$T/violation.py"
+    {
+        printf '%s\n' 'from __future__ import annotations'
+        printf '%s\n' 'import math'
+        printf '%s\n' 'from . import limits'
+        printf '%s\n' '    the value returned'
+        printf '%s\n' '    from :func:`other` is undefined here.'
+    } > "$T/clean.py"
+    local caught missed
+    caught="$(grep -rnE "$IMPORT" "$T/violation.py" 2>/dev/null | grep -vE "$ALLOWED" || true)"
+    missed="$(grep -rnE "$IMPORT" "$T/clean.py" 2>/dev/null | grep -vE "$ALLOWED" || true)"
+    rm -rf "$T"
+    if [ -z "$caught" ]; then
+        echo "${RED}自检失败：kernel 的真违规（import numpy）没被抓到${OFF}" >&2
+        return 1
+    fi
+    if [ -n "$missed" ]; then
+        echo "${RED}自检失败：__future__ / 同包相对 import / docstring 散文被误判${OFF}" >&2
+        echo "$missed" | sed 's/^/    /' >&2
+        return 1
+    fi
+    return 0
+}
+
 selftest "$UI_PATTERN" || exit 2
+kernel_selftest || exit 2
 
 echo
 echo "${BOLD}架构不变量 1 · kernel 零依赖${OFF}"
-# 排除模式不能用 ^ 锚定：grep -rn 的输出带 `文件名:行号:` 前缀，
-# 锚在行首的模式永远匹配不到那之后的 import。用 : 开头接受这个前缀。
-ALLOWED=':[[:space:]]*(import|from)[[:space:]]+(math([[:space:]]|$)|\.)'
 HITS="$(grep -rnE "${IMPORT}" "$PKG/kernel" --include="*.py" 2>/dev/null \
         | grep -vE "$ALLOWED" || true)"
 if [ -n "$HITS" ]; then

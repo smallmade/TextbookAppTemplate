@@ -74,6 +74,24 @@ done
 ls "$P"/dist/*.pkg "$P"/dist/*.ipa >/dev/null 2>&1 || \
     skip "二进制卫生" "Gate S" "dist/ 里还没有包（阶段 08 之前正常）"
 
+# —— 出货副本：剥离 → 两道独立复查 ——
+#
+# 这一段来自热力学项目的会话。剥离脚本自己说「剥完了」不算数，所以剥完之后
+# 有两道方向不同的复查：check_spec --shipped 查【字段】是否剥净，
+# check_ship_isolation 查【内容】里还有没有标识残留。
+# 字段剥干净不等于内容剥干净——作者姓氏留在 sources[].key 里就是实例。
+SHIP="$P/build/specification.ship.json"
+if [ -f "$SPEC" ]; then
+    if python3 "$CI/strip_spec.py" "$SPEC" "$SHIP" >/dev/null 2>&1; then
+        run "出货副本·字段" "Gate 01" python3 "$CI/check_spec.py" "$SHIP" --shipped
+        run "出货副本·内容" "Gate 06" python3 "$CI/check_ship_isolation.py" "$SHIP" --dev "$SPEC"
+    else
+        skip "出货副本" "Gate 01/06" "剥离脚本未通过自检 —— 单独跑 strip_spec.py 看原因"
+    fi
+else
+    skip "出货副本" "Gate 01/06" "没有正典"
+fi
+
 run "许可审计" "Gate 09" python3 "$CI/audit_licences.py" "$P/dist"
 
 echo
