@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -144,9 +145,23 @@ def check_bytes(matrix_dir: Path, manifest: list[dict], rows: int) -> list[str]:
 
 
 def check_gitattributes(project: Path) -> list[str]:
-    ga = project / ".gitattributes"
+    """Look for the protection in this directory **and every one above it**.
+
+    git reads .gitattributes from the repository root as well as from any
+    directory on the way down, so a project whose package lives in a
+    subdirectory keeps its rule at the root -- which is correct, and which the
+    first version of this check reported as missing. A gate that reports a
+    correct arrangement as a fault is a gate that gets switched off.
+    """
     want = "tests/data/matrix"
-    if not ga.exists() or want not in ga.read_text(encoding="utf-8", errors="ignore"):
+    here = project.resolve()
+    for directory in (here, *here.parents):
+        ga = directory / ".gitattributes"
+        if ga.exists() and want in ga.read_text(encoding="utf-8", errors="ignore"):
+            return []
+        if (directory / ".git").exists():
+            break                             # reached the repository root
+    if True:
         return [
             "缺少 .gitattributes 里对 tests/data/matrix 的保护 —— 请加一行：\n"
             "        tests/data/matrix/** -text -diff\n"
@@ -164,7 +179,13 @@ def check_reader(matrix_dir: Path, manifest: list[dict],
     ok = 0
     for r in manifest:
         f = matrix_dir / r["file"]
-        cmd = reader.replace("{file}", str(f))
+        # Quote the substitution. Without it, a project path containing a
+        # space -- a Documents folder, a cloud-synced drive, anything with a
+        # capitalised two-word name -- splits into several arguments inside the
+        # shell, every fixture "fails to read", and the message points at the
+        # reader instead of at the quoting. That is a whole gate rendered
+        # useless by punctuation, and it reported the reader as broken.
+        cmd = reader.replace("{file}", shlex.quote(str(f)))
         try:
             proc = subprocess.run(cmd, shell=True, capture_output=True,
                                   text=True, timeout=30)
@@ -190,6 +211,40 @@ def check_reader(matrix_dir: Path, manifest: list[dict],
 
 # ── 主 ────────────────────────────────────────────────────────────
 
+#: 每一个能把包外文件送进 App 的入口。名字来自 PlotOne 那次 GL 2.1(a)：
+#: 它有 DocumentGroup，所以矩阵对它是必须的；本 App 一个都没有。
+DOORS = ("fileImporter", "NSOpenPanel", "DocumentGroup", "FileDocument",
+         "ReferenceFileDocument", "onDrop(", "NSItemProvider",
+         "UIDocumentPickerViewController")
+
+
+def file_input_surface(project: Path) -> list[str]:
+    """外部文件进得来的每一条路，量出来而不是记在心里。
+
+    只扫**出货**的 Swift 源码与 Info.plist；验证目标读 fixture 是它的工作，
+    与用户能不能塞一个 CSV 进来无关。
+    """
+    found: list[str] = []
+    roots = [project / "swift" / "Sources"]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.swift"):
+            if "Verify" in path.parts or "Tests" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for door in DOORS:
+                if door in text:
+                    found.append(f"{path.relative_to(project)}: {door}")
+    for plist in (project / "dist").rglob("Info.plist"):
+        text = plist.read_bytes()
+        for key in (b"CFBundleDocumentTypes", b"UTImportedTypeDeclarations"):
+            if key in text:
+                found.append(f"{plist.relative_to(project)}: "
+                             f"{key.decode()}")
+    return found
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -202,7 +257,19 @@ def main() -> int:
     project = args.project.resolve()
     matrix_dir = project / "tests" / "data" / "matrix"
     if not matrix_dir.is_dir():
-        print("尚不适用：还没有 tests/data/matrix/ —— 先跑 make_input_matrix.py",
+        # 「还没做」和「没有这回事」意思相反，而这道闸门原本对两者说同一句话。
+        # 所以先去问树：这个 App 有没有任何外部文件入口？没有的话，矩阵不是
+        # 欠着的作业，是不存在的题目——而且这个判断是**量出来的**，一旦有人
+        # 加了 fileImporter，下面这行就会消失，闸门自动从「不适用」变回「必须」。
+        doors = file_input_surface(project)
+        if not doors:
+            print("不适用：该 App 没有任何外部文件入口——"
+                  "扫过 Swift 出货源码与 Info.plist，零个 fileImporter / "
+                  "NSOpenPanel / DocumentGroup / CFBundleDocumentTypes。"
+                  "没有读取器，就没有读取器可测的格式矩阵。", file=sys.stderr)
+            return 2
+        print("尚不适用：还没有 tests/data/matrix/ —— 先跑 make_input_matrix.py。"
+              f"（而这个 App **确实**读外部文件：{'; '.join(doors[:5])}）",
               file=sys.stderr)
         return 2
     manifest = load_manifest(matrix_dir)

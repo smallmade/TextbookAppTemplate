@@ -53,15 +53,49 @@ def forbidden_terms(spec: dict) -> set:
 
 
 def strip(spec: dict) -> dict:
-    out = json.loads(json.dumps(spec))          # 深拷贝，绝不就地改开发正典
-    rules = set(out.get("build", {}).get("strip_on_ship", []))
+    """按 build.strip_on_ship 剥离。
 
-    if "citation" in rules:
+    路径表达式两种形式，都要支持：
+
+      ``key``            顶层键，或每个 module 上的同名键
+      ``head[].field``   head 这个列表里每一项的 field
+
+    **每一条规则都必须被理解。** 第一版只认三条硬编码规则（citation、
+    validity[].citation、sources[].*），别的一律静默忽略——热力学项目的正典声明了
+    ``provenance``、``engines[].citation``、``method_sources[].citation`` 三条，
+    剥离器一条都没执行，而且什么也没说。是后面那道残留自检把它逼出来的。
+
+    一条没人执行的剥离规则，比没有这条规则更糟：正典上写着它会被剥掉，于是
+    没有人再去检查它。所以现在不认识的路径直接抛错。
+    """
+    out = json.loads(json.dumps(spec))          # 深拷贝，绝不就地改开发正典
+    rules = list(out.get("build", {}).get("strip_on_ship", []))
+    unhandled: list[str] = []
+
+    for rule in rules:
+        if rule.startswith("sources[]."):
+            continue                            # 下面按许可单独处理
+        if "[]." in rule:
+            head, _, field = rule.partition("[].")
+            container = out.get(head)
+            if isinstance(container, list):
+                for item in container:
+                    if isinstance(item, dict):
+                        item.pop(field, None)
+            elif isinstance(container, dict):
+                for item in container.values():
+                    if isinstance(item, dict):
+                        item.pop(field, None)
+            elif container is not None:
+                unhandled.append(rule)
+            continue
+        # 裸键：顶层，外加每个 module 上的同名键（citation 就是这样两处都有）
+        touched = out.pop(rule, None) is not None
         for m in out.get("modules", []):
-            m.pop("citation", None)
-    if "validity[].citation" in rules:
-        for v in out.get("validity", []):
-            v.pop("citation", None)
+            if m.pop(rule, None) is not None:
+                touched = True
+        if not touched:
+            unhandled.append(rule)
 
     for s in out.get("sources", []):
         if s.get("ship") is True:               # 公有领域：具名是资产，留着
@@ -69,6 +103,13 @@ def strip(spec: dict) -> dict:
         for f in SOURCE_FIELDS:
             if f"sources[].{f}" in rules:
                 s.pop(f, None)
+
+    if unhandled:
+        raise ValueError(
+            "strip_on_ship 里有剥离器无法执行的路径："
+            + ", ".join(repr(r) for r in unhandled)
+            + " —— 一条没人执行的剥离规则比没有这条规则更糟"
+        )
     return out
 
 

@@ -42,6 +42,18 @@ fail() { echo "  ${RED}✗${OFF} $1"; FAILURES=$((FAILURES + 1)); }
 pass() { echo "  ${GREEN}✓${OFF} $1"; }
 note() { echo "  ${YELLOW}−${OFF} $1"; }
 
+# 哪几项真的跑了。
+#
+# 规范说的是「六项检查**全数**通过」，而这个脚本跑一次只查得到其中一半：
+# 对源码目录跑 S-1..3，对成品包跑 S-4..6。两次都跑过才算数，而在这之前
+# 结尾那句「Gate S 通过」是**对一半的检查说的**，读起来像对六项说的。
+#
+# 一道说「通过」而没说「通过了什么」的闸门，会被读成它没做过的保证。
+RAN=()
+SKIPPED=()
+ran()     { RAN+=("$1"); }
+skipped() { SKIPPED+=("$1"); }
+
 # —— 展开 .pkg / .ipa ——
 case "$TARGET" in
     *.pkg)
@@ -71,9 +83,54 @@ IS_BUNDLE=false
 # ══════════════════════════════════════════════════════════════
 # S-1 / S-2 / S-3：源码层。只在传源码目录时跑。
 # ══════════════════════════════════════════════════════════════
+# 源码层的三张模式表。
+#
+# 每一条都必须在【标识符边界】上匹配，不能匹配到更长名字的内部。
+# 这条纪律是被同一类缺陷咬过三次才写下来的：
+#
+#   * `turns` 命中了 kernel 里五十处 "returns nan"；
+#   * 注释过滤的锚点落在 grep 输出的 path 上，一行注释都没排除掉；
+#   * 而这里，`system(` 命中了 SwiftUI 的 `Font.system(.body)`——
+#     **每一个 SwiftUI 应用都会满屏飘红**。
+#
+# 一个会乱叫的闸门两天之内就会被人关掉，那比没有闸门更糟。所以 `system(`
+# 前面必须不是点号也不是标识符字符：C 的 `system("rm -rf")` 会被抓到，
+# `Font.system(...)`、`Color.systemBackground` 不会。
+S1_PATTERN='ProcessInfo\.processInfo\.environment|(^|[^.[:alnum:]_])getenv[[:space:]]*\('
+S2_PATTERN='(^|[^.[:alnum:]_])Process[[:space:]]*\(\)|(^|[^.[:alnum:]_])posix_spawn[[:space:]]*\(|(^|[^.[:alnum:]_])system[[:space:]]*\(|/usr/bin/|/usr/sbin/|/opt/homebrew|/usr/local/bin|/opt/local'
+S3_PATTERN='(^|[^.[:alnum:]_])dlopen[[:space:]]*\(|(^|[^.[:alnum:]_])dlsym[[:space:]]*\(|NSClassFromString|performSelector'
+
+# 源码层自检：两个方向都要证。
+#
+# 「真违规漏掉」让闸门失效；「合规代码误判」让闸门被关掉。第二种更常见，
+# 也更难发现——它不会报错，只会让人不再看它的输出。
+source_selftest() {
+    local T; T="$(mktemp -d)" || return 1
+    printf 'let mode = ProcessInfo.processInfo.environment["QA"]\n' > "$T/bad1.swift"
+    printf 'let out = Process()\n' > "$T/bad2.swift"
+    printf 'let h = dlopen("/usr/lib/x.dylib", 0)\n' > "$T/bad3.swift"
+    printf 'let f = Font.system(.body, design: .monospaced)\n' > "$T/ok1.swift"
+    printf 'let c = Color.systemBackground\n' > "$T/ok2.swift"
+    printf 'let n = beam.processed()\n' > "$T/ok3.swift"
+    local rc=0
+    grep -rnE "$S1_PATTERN" "$T/bad1.swift" >/dev/null 2>&1 || { echo "自检失败：S-1 漏了真违规" >&2; rc=1; }
+    grep -rnE "$S2_PATTERN" "$T/bad2.swift" >/dev/null 2>&1 || { echo "自检失败：S-2 漏了真违规" >&2; rc=1; }
+    grep -rnE "$S3_PATTERN" "$T/bad3.swift" >/dev/null 2>&1 || { echo "自检失败：S-3 漏了真违规" >&2; rc=1; }
+    for good in ok1 ok2 ok3; do
+        if grep -rnE "$S1_PATTERN|$S2_PATTERN|$S3_PATTERN" "$T/$good.swift" >/dev/null 2>&1; then
+            echo "自检失败：合规代码被误判（$good）——闸门会因此被关掉" >&2; rc=1
+        fi
+    done
+    rm -rf "$T"
+    return $rc
+}
+
 if ! $IS_BUNDLE; then
+    source_selftest || { echo "${RED}${BOLD}闸门自身不可信，拒绝报告结果。${OFF}" >&2; exit 2; }
+
+    ran "S-1"
     echo "${BOLD}S-1 环境变量读取${OFF}"
-    HITS="$(grep -rn "ProcessInfo\.processInfo\.environment\|getenv(" "$TARGET" \
+    HITS="$(grep -rnE "$S1_PATTERN" "$TARGET" \
             --include="*.swift" --include="*.c" --include="*.m" 2>/dev/null || true)"
     if [ -n "$HITS" ]; then
         fail "出货代码读取环境变量："; echo "$HITS" | sed 's/^/      /'
@@ -83,9 +140,10 @@ if ! $IS_BUNDLE; then
     fi
 
     echo
+    ran "S-2"
     echo "${BOLD}S-2 进程派生与包外路径${OFF}"
-    HITS="$(grep -rn "Process()\|posix_spawn\|system(\|/usr/bin/\|/usr/sbin/\|/opt/homebrew\|/usr/local/bin\|/opt/local" \
-            "$TARGET" --include="*.swift" --include="*.c" --include="*.m" 2>/dev/null || true)"
+    HITS="$(grep -rnE "$S2_PATTERN" "$TARGET" \
+            --include="*.swift" --include="*.c" --include="*.m" 2>/dev/null || true)"
     if [ -n "$HITS" ]; then
         fail "派生进程或引用包外路径："; echo "$HITS" | sed 's/^/      /'
         echo "      → App 只能执行随自己签名、一起送审的 helper。"
@@ -94,8 +152,9 @@ if ! $IS_BUNDLE; then
     fi
 
     echo
+    ran "S-3"
     echo "${BOLD}S-3 动态代码加载${OFF}"
-    HITS="$(grep -rn "dlopen\|dlsym\|NSClassFromString\|performSelector" "$TARGET" \
+    HITS="$(grep -rnE "$S3_PATTERN" "$TARGET" \
             --include="*.swift" --include="*.m" 2>/dev/null || true)"
     if [ -n "$HITS" ]; then
         fail "动态代码加载："; echo "$HITS" | sed 's/^/      /'
@@ -103,9 +162,12 @@ if ! $IS_BUNDLE; then
         pass "无动态代码加载"
     fi
 
+    skipped "S-4"; skipped "S-5"; skipped "S-6"
     echo
     if [ "$FAILURES" -eq 0 ]; then
-        echo "${GREEN}${BOLD}源码层通过。${OFF}提交前务必再对成品包跑一次本脚本。"
+        echo "${GREEN}${BOLD}S-1 S-2 S-3 通过。${OFF}"
+        echo "${YELLOW}S-4 S-5 S-6 未查${OFF} —— 它们只能对成品包跑，而【源码干净不等于"
+        echo "二进制干净】：资源文件、正典副本、第三方库都可能带进禁用字串。"
     else
         echo "${RED}${BOLD}源码层 $FAILURES 项未通过。${OFF}"
     fi
@@ -123,6 +185,18 @@ BANNED=(
     "/opt/homebrew" "/usr/local/bin" "/opt/local/bin" "/usr/sbin/" "/usr/bin/"
     # 隐藏开关的常见命名
     "QA_MODE" "DEBUG_MENU" "INTERNAL_ONLY" "STAGING_URL" "TEST_HOOK"
+    # 构建机的家目录。
+    #
+    # 一个出货二进制里不该出现 /Users/ —— 它只可能来自把开发机的绝对路径
+    # 烙进了产物，而那正是不变量 4 说的「行为依赖包外的输入」。
+    #
+    # 这一条是被 SwiftPM 咬出来的：给一个 executable target 声明 resources，
+    # 它会生成一个 `Bundle.module` accessor，兜底路径是【本机构建目录的
+    # 绝对路径】。而在开发期，那条兜底路径就是真正生效的那条——装配出来的
+    # .app 从来没有自足过，换一台机器就会在启动时 trap。
+    #
+    # 二进制里那一行字串是唯一的痕迹。S-4 现在会看见它。
+    "/Users/"
 )
 # macOS 自带 bash 3.2：set -u 下展开空数组会报 unbound，必须带默认值
 BANNED+=(${EXTRA_WORDS[@]+"${EXTRA_WORDS[@]}"})
@@ -140,6 +214,20 @@ PATTERN="$(IFS='|'; echo "${BANNED[*]}")"
 # 也不能让它每次都误报：真正致命的那几个词（QAHooks、自定义环境变量名）
 # 是精确匹配，不受这条过滤影响。
 PROVENANCE='--prefix=|--enable-|--disable-|-isysroot|--sysroot|configuration:|Apple clang version|InstalledDir'
+# 调试映射（debug map）。
+#
+# 未 strip 的 Mach-O 里，每一个参与链接的目标文件都留着一条 N_OSO 记录，
+# 内容是它在构建机上的绝对路径：`/Users/…/X.build/Axial.swift.o`。
+# 那是**出处**，不是运行期路径——App 从不打开它们，而 Xcode 归档时会把
+# 整张表 strip 掉。
+#
+# 但它和真正危险的那种绝对路径混在同一条模式下。区别在结尾：调试映射指向
+# `.o` / `.swiftmodule` / `.dylib` 这类构建产物；而 `Bundle.module` 的兜底
+# 路径指向 `.bundle`——一个代码会真的去【打开】的东西。
+#
+# 所以这里只放行以构建产物结尾的那些，其余的一律留着报出来。
+# 顺带：出货打包会 strip，所以在真正送审的产物上这条过滤不该有任何作用。
+PROVENANCE="$PROVENANCE"'|/Users/.*\.(o|swiftmodule|swiftdoc|swiftsourceinfo|dylib|a)$'
 
 # 自检：先用一个必然命中的样本走一遍完整管线。
 #
@@ -154,26 +242,43 @@ if [ "$SELFTEST" != "QAHooks" ]; then
     exit 2
 fi
 
+ran "S-4"
 echo "${BOLD}S-4 成品字符串${OFF}"
-EXECUTABLES="$(find "$TARGET" -type f -perm +111 ! -name "*.dylib" ! -name "*.plist" 2>/dev/null)"
-DYLIBS="$(find "$TARGET" -type f -name "*.dylib" -o -type f -path "*.framework/*" -perm +111 2>/dev/null)"
+# NUL 分隔，不用词分割。
+#
+# 这一段原本是 `for f in $(find ...)`，而这个仓库的路径里有空格
+# （"My Drive"、"APP-Development"）。用相对路径调用时它碰巧是对的；
+# run_all.sh 传的是绝对路径，于是每一个文件名都被空格切成碎片，
+# `[ -f "$f" ]` 全部为假，**循环一个文件都没检查，然后打印「零命中 ✓」**。
+#
+# 这正是本文件开头那句话的第二个实例：一道静默放行的闸门比没有闸门更糟。
+# 所以下面除了修掉词分割，还数了一下到底看过几个 Mach-O——看过零个就是
+# 未通过，不是通过。
 S4_HIT=false
-for f in $EXECUTABLES $DYLIBS; do
-    [ -f "$f" ] || continue
+S4_SEEN=0
+while IFS= read -r -d '' f; do
     file "$f" | grep -q "Mach-O" || continue
+    S4_SEEN=$((S4_SEEN+1))
     HITS="$(strings -a - "$f" 2>/dev/null | grep -iE "$PATTERN" \
             | grep -vE -e "$PROVENANCE" | sort -u || true)"
     if [ -n "$HITS" ]; then
         fail "${f#$TARGET/}"; echo "$HITS" | sed 's/^/        /'
         S4_HIT=true
     fi
-done
-$S4_HIT || pass "所有 Mach-O 文件零命中"
+done < <(find "$TARGET" -type f \
+              \( \( -perm +111 ! -name "*.plist" \) -o -name "*.dylib" \) \
+              -print0 2>/dev/null)
+if [ "$S4_SEEN" -eq 0 ]; then
+    fail "一个 Mach-O 都没看到——这不是零命中，这是没检查"
+    S4_HIT=true
+fi
+$S4_HIT || pass "$S4_SEEN 个 Mach-O 文件零命中"
 
 # ══════════════════════════════════════════════════════════════
 # S-5：外部链接。不得链接到包外的任何东西。
 # ══════════════════════════════════════════════════════════════
 echo
+ran "S-5"
 echo "${BOLD}S-5 外部链接${OFF}"
 MAIN="$TARGET/Contents/MacOS/$(basename "$TARGET" .app)"
 [ -f "$MAIN" ] || MAIN="$TARGET/$(basename "$TARGET" .app)"
@@ -196,8 +301,10 @@ echo
 echo "${BOLD}S-6 签名 entitlements${OFF}"
 ENT="$(codesign -d --entitlements - --xml "$TARGET" 2>/dev/null | plutil -p - 2>/dev/null || true)"
 if [ -z "$ENT" ]; then
+    skipped "S-6"
     note "未签名或读不到 entitlements，跳过"
 else
+    ran "S-6"
     if echo "$ENT" | grep -q 'get-task-allow" => true'; then
         fail "get-task-allow 为 true —— 这是调试签名，不能上架"
     else
@@ -232,9 +339,14 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════
+skipped "S-1"; skipped "S-2"; skipped "S-3"
 echo
 if [ "$FAILURES" -eq 0 ]; then
-    echo "${GREEN}${BOLD}Gate S 通过。${OFF}"
+    echo "${GREEN}${BOLD}$(IFS=' '; echo "${RAN[*]}") 通过。${OFF}"
+    if [ ${#SKIPPED[@]} -gt 0 ]; then
+        echo "${YELLOW}$(IFS=' '; echo "${SKIPPED[*]}") 未查${OFF} —— S-1..3 要对源码目录跑，"
+        echo "S-6 要对已签名的包跑。规范说的是【六项全数通过】，两次都跑过才算。"
+    fi
     echo
     exit 0
 else

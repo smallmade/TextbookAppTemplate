@@ -51,6 +51,15 @@ def to_camel(snake: str) -> str:
     return head + "".join(w.capitalize() for w in rest)
 
 
+def swift_identifiers(text: str) -> set[str]:
+    """Every identifier in the Swift sources, lowercased.
+
+    Used for the acronym comparison below, which needs to know what names exist
+    rather than whether one substring appears.
+    """
+    return {word.lower() for word in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--python", required=True, type=Path)
@@ -58,6 +67,7 @@ def main() -> int:
     args = ap.parse_args()
 
     swift_text = swift_source_text(args.swift)
+    identifiers = swift_identifiers(swift_text)
     missing_layers, missing_names, total = [], [], 0
 
     for layer in CROSSING:
@@ -68,8 +78,18 @@ def main() -> int:
         for name in sorted(python_public_names(pdir)):
             total += 1
             camel = to_camel(name)
-            if not re.search(rf"\b({re.escape(name)}|{re.escape(camel)})\b", swift_text):
-                missing_names.append(f"{layer}.{name}")
+            if re.search(rf"\b({re.escape(name)}|{re.escape(camel)})\b", swift_text):
+                continue
+            # Swift spells acronyms uniformly -- `shearFromUDL`, not
+            # `shearFromUdl`; `memberLength2D`, not `memberLength2d`. The camel
+            # rule above cannot produce those, and demanding it would make this
+            # gate require unidiomatic Swift, which is how a gate gets turned
+            # off. Compare case-insensitively against the identifiers that are
+            # actually there: the question is whether the name **exists**, not
+            # how it is capitalised.
+            if camel.lower() in identifiers:
+                continue
+            missing_names.append(f"{layer}.{name}")
 
     if missing_layers:
         print(f"✗ 受检层缺失：{missing_layers}")

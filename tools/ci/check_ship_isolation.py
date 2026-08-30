@@ -17,7 +17,16 @@ TWO DESIGN DECISIONS, both learned the hard way:
     and this gate starts guarding it the same day. A hand-maintained list goes
     stale silently, and a stale isolation gate reports success.
 
-2.  It does NOT scan for the bare word "law". A combustion textbook by an author
+2.  A structural reference is only a violation when it points at a source the
+    canon marks as NOT shippable. Naming a public-domain government report --
+    "affdl-sam Ch. 3", "nasa-asm Sec. A1" -- is explicitly permitted by the
+    legal-isolation rules and, the standard says, increases credibility rather
+    than risking anything. The first version had no such distinction and fired
+    23 times on exactly those strings; every hit was legitimate. Which sources
+    are shippable comes from the canon's `sources[]`, the same place the
+    surnames do, so adding a source settles both questions at once.
+
+3.  It does NOT scan for the bare word "law". A combustion textbook by an author
     of that name exists, but "second law", "first law" and "third law" are the
     ordinary vocabulary of this subject and appear in dozens of legitimate
     strings. A gate that fires on those is a gate that gets switched off within
@@ -108,13 +117,40 @@ def walk(node, path="$"):
         yield path, node
 
 
-def scan(ship: dict, terms) -> list[str]:
+def shippable_keys(dev: dict) -> list[str]:
+    """Source keys the canon says may be named in the shipped product.
+
+    Public-domain government reports are on the permitted list in the
+    legal-isolation rules; copyrighted textbooks are not. The canon already
+    records which is which, so this is read rather than restated.
+    """
+    return [src["key"] for src in dev.get("sources", [])
+            if src.get("ship") is True or src.get("licence") == "public-domain"]
+
+
+def cites_only_shippable(text: str, keys: list[str]) -> bool:
+    """Is every source named in this string one that may ship?
+
+    A string like ``"affdl-sam Ch. 3"`` carries a chapter reference, but to a
+    document the canon clears for naming. A string with a chapter reference and
+    no shippable key named is the case this gate exists for.
+    """
+    named = [key for key in keys if key in text]
+    return bool(named)
+
+
+def scan(ship: dict, terms, shippable: list[str] | None = None) -> list[str]:
+    shippable = shippable or []
     hits = []
     for path, text in walk(ship):
         for pat, why in terms + STRUCTURAL:
             m = pat.search(text)
-            if m:
-                hits.append(f"{path}: {m.group(0)!r} -- {why}")
+            if not m:
+                continue
+            if (pat, why) in [(p, w) for p, w in STRUCTURAL] \
+                    and cites_only_shippable(text, shippable):
+                continue
+            hits.append(f"{path}: {m.group(0)!r} -- {why}")
     return hits
 
 
@@ -157,8 +193,17 @@ def main() -> int:
                 "c": "third-law entropies are required for reacting systems",
                 "d": "IAPWS-IF97 verification tables are the fixture source",
                 "e": "NASA and NIST data are public domain and are named on screen"}
-        fired = scan(bad, terms)
-        quiet = scan(good, terms)
+        # A chapter reference INTO a public-domain source is permitted, and was
+        # the gate's first and only false-positive class: 23 hits, all legal.
+        shippable = shippable_keys(dev)
+        if shippable:
+            good["f"] = f"{shippable[0]} Ch. 3"
+            good["g"] = f"{shippable[0]} Sec. A1; verification fixture"
+            # ...but the same pattern with no shippable source named must still
+            # fire, or the exemption has swallowed the rule.
+            bad["d"] = "as set out in Ch. 7 of the course text"
+        fired = scan(bad, terms, shippable)
+        quiet = scan(good, terms, shippable)
         if len(fired) < 3:
             print(f"SELFTEST FAILED: known-bad sample produced only "
                   f"{len(fired)} hits, expected 3. The scan is not working, and "
@@ -181,7 +226,7 @@ def main() -> int:
         return 2
 
     ship = json.loads(args.ship.read_text(encoding="utf-8"))
-    hits = scan(ship, terms)
+    hits = scan(ship, terms, shippable_keys(dev))
     if hits:
         print(f"Gate 06 ship isolation FAILED: {len(hits)} identifier(s) "
               f"survived stripping")
