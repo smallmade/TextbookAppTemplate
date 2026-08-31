@@ -100,12 +100,28 @@ def normalise(text: str) -> str:
 MIN_DIGITS = 4
 
 
+#: `12.5e6` 这种写法里，`e6` 是**量级，不是证据**。页面上印的是
+#: `12.5 x 10^6`——要比对的是尾数 `12.5`，指数那个 `6` 从来不是可以拿去
+#: 页面上找的数字。把它算进位数，会让一个三位数的尾数看起来像四位，正好
+#: 跨过 MIN_DIGITS 的门槛而被当成"够强的证据"去比对，然后必然找不到、
+#: 报一个假的不合规。这与分母比对被拆穿的是同一个错误：**把不是证据的
+#: 东西算成了证据**。所以位数只数尾数，比对也只比对尾数。
+SCIENTIFIC = re.compile(r"^([+-]?[0-9.]+)[eE][+-]?[0-9]+$")
+
+
+def mantissa(value: str) -> str:
+    """`12.5e6` -> `12.5`；不是科学记数法就原样返回。"""
+    m = SCIENTIFIC.match(value.strip())
+    return m.group(1) if m else value
+
+
 def digits(value: str) -> int:
-    return len(re.sub(r"[^0-9]", "", value))
+    return len(re.sub(r"[^0-9]", "", mantissa(value)))
 
 
 def variants(value: str) -> list[str]:
     """一个印刷值在页上可能长的几个样子。"""
+    value = mantissa(value)
     out = {value}
     if value.endswith(".0"):
         out.add(value[:-2])
@@ -349,6 +365,29 @@ def self_test(root: Path, refs: Path, PdfReader) -> int:
             ok &= good
             print(f"  {'PASS' if good else 'FAIL'}  人工核对：{name}"
                   f"（{'通过' if passed else '未通过'}）")
+
+    # 科学记数法：位数只能数尾数。`12.5e6` 的尾数是三位，够不上门槛，必须
+    # 落进"查不了"；`32.06e6` 的尾数是四位，够得上，而且要拿 `32.06` 去页面
+    # 上找——不是拿 `12.5e6` 这个字串去找，那在任何一页上都不会有。
+    # 这一段是被真实 fixture 逼出来的：section_properties.csv 整份用科学记数
+    # 法写，指数一旦被算进位数，`12.5e6` 会被当成四位而去比对，然后必然找不
+    # 到，报一个假的不合规。
+    for value, want_digits, want_variant, is_sci in (
+            ("12.5e6", 3, "12.5", True),
+            ("32.06e6", 4, "32.06", True),
+            ("0.23e6", 3, "0.23", True),
+            ("781.25", 5, "781.25", False),   # 不是科学记数法的照旧
+    ):
+        got_digits = digits(value)
+        got_variants = variants(value)
+        # 科学记数法的原字串绝不能留在比对清单里——`12.5e6` 拿去页面上找
+        # 永远找不到。非科学记数法的原字串则必须留着。
+        good = (got_digits == want_digits and want_variant in got_variants
+                and (value not in got_variants) == is_sci)
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  科学记数法：{value} "
+              f"位数={got_digits}（应为 {want_digits}），"
+              f"比对 {got_variants}")
 
     print("\n自检通过——闸门确实分得出对页与错页，也分得出真理由与编的理由"
           if ok else "\n自检失败")
