@@ -37,6 +37,17 @@ paperwork is actually there:
         thickness and the denominator wrongly repeats the cylinder's. Nothing
         was resolved, so it is not `disputed`; something is wrong, so it should
         not vanish. Its own column, and the key must be in SOURCE.md.
+  L5-7  a third verdict, `unavailable`, for the case `agrees`/`disputed` cannot
+        express either: **no source was ever found**, printed or retrieved.
+        This is not "disputed with itself" -- there is nothing to disagree
+        with -- and it is not "agrees" with a blank page. It names no
+        location and no published/expected pair; it names an adjudication key,
+        same as `disputed`, and SOURCE.md under that key says what was
+        searched and what stands in the source's place. First needed when a
+        classical fixed-end-moment coefficient (a propped cantilever under a
+        third-point load) turned out to be printed in none of the four primary
+        works nor the public-domain second source that covered the rest of the
+        same table.
 
 Run with --self-test to prove the gate is alive.  A gate that reports "no
 problems found" without ever having been shown a problem is not evidence; this
@@ -52,7 +63,7 @@ import re
 import sys
 from pathlib import Path
 
-VERDICTS = {"agrees", "disputed"}
+VERDICTS = {"agrees", "disputed", "unavailable"}
 
 #: Columns every transcribed row needs, whatever it was transcribed from.
 REQUIRED = ("module", "tag", "quantity", "unit", "published", "expected",
@@ -104,6 +115,37 @@ def check(rows: list[dict[str, str]], source: str, name: str) -> list[str]:
             if not row[field].strip():
                 fault(row, f"L5-2 {field} is empty")
 
+        # L5-3 -- an unrecognised verdict is an unadjudicated one. Checked
+        # before location/numbers, because `unavailable` (L5-7) does not have
+        # either and branches away from every check below this point.
+        verdict = row["verdict"].strip()
+        if verdict not in VERDICTS:
+            fault(row, f"L5-3 verdict {verdict!r} is not one of "
+                       f"{', '.join(sorted(VERDICTS))}")
+            continue
+
+        key = row["adjudication"].strip()
+
+        if verdict == "unavailable":
+            # L5-7 -- no source was ever found, which is a different claim
+            # from either agreeing or disagreeing with one. A location or a
+            # published/expected pair here would contradict the verdict: if a
+            # location exists, the row agrees or disputes it, full stop.
+            located = any(row.get(f, "").strip()
+                          for fields in LOCATORS.values() for f in fields)
+            if located:
+                fault(row, "L5-7 marked unavailable but names a source "
+                           "location -- a location means it was found")
+            if row.get("published", "").strip() or row.get("expected", "").strip():
+                fault(row, "L5-7 marked unavailable but published/expected "
+                           "are filled in -- there is nothing to compare")
+            if not key:
+                fault(row, "L5-7 marked unavailable but names no adjudication "
+                           "-- say what was searched and what stands in its place")
+            elif key not in source:
+                fault(row, f"L5-7 adjudication {key!r} is not in SOURCE.md")
+            continue
+
         # L5-2 -- a value nobody can find again is not evidence.  Which fields
         # say "where" depends on what kind of source it was; see LOCATORS.
         present = {}
@@ -114,7 +156,8 @@ def check(rows: list[dict[str, str]], source: str, name: str) -> list[str]:
         if not present:
             fault(row, "L5-2 names no source location at all: give either "
                        f"{'/'.join(LOCATORS['paginated'])} or "
-                       f"{'/'.join(LOCATORS['retrieved'])}")
+                       f"{'/'.join(LOCATORS['retrieved'])}, or mark the row "
+                       "unavailable if none exists")
         elif len(present) > 1:
             fault(row, f"L5-2 names {len(present)} kinds of location "
                        f"({', '.join(sorted(present))}); a number is read from "
@@ -135,13 +178,6 @@ def check(rows: list[dict[str, str]], source: str, name: str) -> list[str]:
                 if where and not where.startswith(("http://", "https://")):
                     fault(row, f"L5-2 url is not a URL: {where!r}")
 
-        # L5-3 -- an unrecognised verdict is an unadjudicated one.
-        verdict = row["verdict"].strip()
-        if verdict not in VERDICTS:
-            fault(row, f"L5-3 verdict {verdict!r} is not one of "
-                       f"{', '.join(sorted(VERDICTS))}")
-            continue
-
         try:
             published = float(row["published"])
             expected = float(row["expected"])
@@ -154,7 +190,6 @@ def check(rows: list[dict[str, str]], source: str, name: str) -> list[str]:
         if printing and printing not in source:
             fault(row, f"L5-6 printing_fault {printing!r} is not in SOURCE.md")
 
-        key = row["adjudication"].strip()
         if verdict == "agrees":
             # L5-4 -- "agrees" must mean agrees.
             if published != expected:
@@ -287,6 +322,23 @@ BAD = [
        "retrieved": "2026-08-31", "query": "argon", "quantity": "q",
        "unit": "u", "published": "1", "expected": "1", "verdict": "agrees",
        "adjudication": ""}]),
+    # L5-7: `unavailable` is a claim of absence, and it has to stay one.
+    ("L5-7", "unavailable but a page is given anyway",
+     [{"module": "M1", "tag": "t", "page_pdf": "1", "page_printed": "1",
+       "section": "1", "quantity": "q", "unit": "u", "published": "",
+       "expected": "", "verdict": "unavailable", "adjudication": "A-1"}]),
+    ("L5-7", "unavailable with a comparison filled in",
+     [{"module": "M1", "tag": "t", "quantity": "q", "unit": "u",
+       "published": "1", "expected": "1", "verdict": "unavailable",
+       "adjudication": "A-1"}]),
+    ("L5-7", "unavailable with no reasoning",
+     [{"module": "M1", "tag": "t", "quantity": "q", "unit": "u",
+       "published": "", "expected": "", "verdict": "unavailable",
+       "adjudication": ""}]),
+    ("L5-7", "unavailable with a dangling key",
+     [{"module": "M1", "tag": "t", "quantity": "q", "unit": "u",
+       "published": "", "expected": "", "verdict": "unavailable",
+       "adjudication": "Z-9"}]),
 ]
 
 
@@ -310,6 +362,9 @@ def self_test() -> int:
                        "retrieved": "2026-08-31", "query": "argon, 166 K, 1 MPa",
                        "quantity": "q", "unit": "u", "published": "1",
                        "expected": "1", "verdict": "agrees", "adjudication": ""}],
+        "unavailable": [{"module": "M1", "tag": "t", "quantity": "q", "unit": "u",
+                         "published": "", "expected": "",
+                         "verdict": "unavailable", "adjudication": "A-1"}],
     }
     for form, rows_ in good.items():
         quiet = not check(rows_, source, "self-test")
