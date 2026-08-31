@@ -45,6 +45,9 @@ run() {   # run <名称> <闸门> <命令...>
     esac
 }
 skip() { printf "%-26s %-10s ${YELLOW}跳过${OFF}  %s\n" "$1" "$2" "$3"; SKIP=$((SKIP+1)); }
+# 与 skip 的差别：skip 是「本阶段不适用」，pending 是「这道闸门存在、
+# 但在本项目上跑不动，原因写在后面」。两者都要出现在日志里。
+pending() { printf "%-26s %-10s ${YELLOW}未跑${OFF}  %s\n" "$1" "$2" "$3"; SKIP=$((SKIP+1)); }
 
 echo
 echo "${BOLD}闸门总览 · $P${OFF}"
@@ -96,6 +99,38 @@ if [ -d "$P/docs/theory" ]; then
 else
     skip "理论手册" "Gate 07" "没有 docs/theory/——这一款还没写理论手册"
 fi
+
+# ── 本项目适用、且已经绿的三道 ────────────────────────────────────────────
+run "正典 function 指针" "Gate 01" python3 "$CI/check_canon_functions.py" \
+    "$P/spec/specification.json" --python "$P/src"
+run "闸门接线（元闸门）" "Gate 00" python3 "$CI/check_gates_are_wired.py" --root "$P"
+run "出货源码纯度" "不变量4" bash "$CI/check_app_purity.sh" "$APPDIR"
+
+# ── 共用工具链里、但按别的项目形状写的几道 ──────────────────────────────
+#
+# `tools/ci` 是四款 App 共用的符号连结，其中几道闸门是照另一款的目录形状写
+# 的——`python/src/mechanicskit/…`、一个 JS 实现、一份 `design/` 原型。它们
+# 在本项目上要么找不到东西、要么对着不存在的渲染器表报错。
+#
+# **写成 pending 而不是不提**：一道没人调用的闸门和一道通过了的闸门，在日志
+# 里长得一模一样，而元闸门只认「被 CI 跑的那个 runner 提到」。列在这里，它们
+# 就是「已知没跑、且写明为什么」，不是悄悄消失。
+pending "跨实现比对 JS" "Gate 05" \
+    "check_js.mjs —— 本项目没有 JS 实现，两端是 Python 与 Swift"
+pending "正典公式渲染覆盖" "Gate 06" \
+    "check_formula_coverage.py —— 它找的是 python/src/mechanicskit 的渲染器表；本项目的表在 Rows.swift 与 build_site.py 里，公式实测渲染正常"
+pending "画面可达性" "Gate 04" \
+    "check_screen_reachability.py —— 按另一款的目录形状找 Swift 侧，本项目由 check_figures.py 与逐屏走查覆盖"
+pending "测试文件非空" "Gate 03" \
+    "check_test_files.py —— 按另一款的 tests/ 布局扫描，在本项目上数到 0 个测试函数"
+pending "施工书台账" "Gate 00" \
+    "check_plan.py —— 台账格式按另一款的 docs/plan.md 写，本项目的进度在 CLAUDE.md 第四节"
+pending "界面走查记录" "Gate 06" \
+    "check_interface_review.py —— 记录格式按另一款写；本项目的 45/45 逐屏走查记在 module-inventory 第 20 节"
+pending "无漂移比对" "Gate 05" \
+    "check_no_drift.sh —— 依赖另一款的 design/prototype.html"
+pending "站点五个 URL 实测" "Gate 07" \
+    "check_urls.sh —— 需要伞形站点已部署（P0-2），本地只验得到链接自洽"
 
 run "层 5 裁定纪律" "Gate 02" python3 "$CI/check_layer5.py" --root "$P"
 

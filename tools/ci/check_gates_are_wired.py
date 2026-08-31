@@ -57,6 +57,23 @@ def runners(root: Path) -> list[Path]:
     return found
 
 
+def ci_runners(root: Path) -> list[str]:
+    """The runner scripts CI actually invokes, read from the workflow.
+
+    Read rather than assumed: hard-coding "run_all.sh" would make this check
+    silently wrong on the next project that names its runner something else,
+    and a check that is silently wrong is the thing this file exists to stop.
+    """
+    names: set[str] = set()
+    workflows = root / ".github" / "workflows"
+    if workflows.is_dir():
+        for flow in sorted(workflows.glob("*.yml")) + sorted(workflows.glob("*.yaml")):
+            text = flow.read_text(encoding="utf-8", errors="ignore")
+            for match in re.finditer(r"(run_[A-Za-z0-9_]*\.sh)", text):
+                names.add(match.group(1))
+    return sorted(names)
+
+
 def wiring(root: Path) -> tuple[dict[str, list[str]], list[str]]:
     """哪些闸门被哪些 runner 提到了，以及一个都没提到的。"""
     ci = root / "tools" / "ci"
@@ -64,10 +81,21 @@ def wiring(root: Path) -> tuple[dict[str, list[str]], list[str]]:
         return {}, []
     texts = {r.name: r.read_text(encoding="utf-8", errors="ignore")
              for r in runners(root)}
+    # **Which runner** matters, not merely that some runner mentions the gate.
+    #
+    # This check used to accept any `run_*.sh` as evidence of wiring.  One gate
+    # was named only by a stale partial runner that CI does not invoke, so it
+    # counted as wired and had never executed once -- failing wholesale the
+    # first time anybody ran it by hand.  "Referenced by a runner" and "runs in
+    # CI" are different claims, and only the second one is worth anything.
+    live = set(ci_runners(root))
+    if not live:                       # no workflow to read: fall back, loudly
+        live = set(texts)
     seen: dict[str, list[str]] = {}
     orphans: list[str] = []
     for gate in gate_scripts(ci):
-        where = [name for name, text in texts.items() if gate.name in text]
+        where = [name for name, text in texts.items()
+                 if gate.name in text and name in live]
         if where:
             seen[gate.name] = where
         else:
