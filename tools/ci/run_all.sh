@@ -91,6 +91,12 @@ LISTING="$P/submission/LISTING.md"
 [ -f "$LISTING" ] && run "文案字数" "Gate 07" python3 "$CI/check_listing_limits.py" "$LISTING" \
                   || skip "文案字数" "Gate 07" "没有 submission/LISTING.md"
 
+if [ -d "$P/docs/theory" ]; then
+    run "理论手册" "Gate 07" python3 "$CI/check_theory.py" --root "$P"
+else
+    skip "理论手册" "Gate 07" "没有 docs/theory/——这一款还没写理论手册"
+fi
+
 run "层 5 裁定纪律" "Gate 02" python3 "$CI/check_layer5.py" --root "$P"
 
 # 打包一致性：只有当 PyInstaller spec 与 Inno 脚本都存在时才适用（阶段 09）。
