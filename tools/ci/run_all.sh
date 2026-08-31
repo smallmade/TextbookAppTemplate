@@ -54,7 +54,17 @@ SPEC="$P/spec/specification.json"
 [ -f "$SPEC" ] && run "正典" "Gate 01" python3 "$CI/check_spec.py" "$SPEC" \
                 || skip "正典" "Gate 01" "没有 spec/specification.json"
 
-PKG="$(find "$P/src" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+# 不能只挑「src/ 下第一个目录」——`pip install -e '.[dev]'` 会在 src/ 下
+# 多生成一个 src/<name>.egg-info/，跟真正的包目录做兄弟。第一次在 CI 上
+# 真跑起来就撞上了：find | head -1 抓到 egg-info，把它当 $PKG 一路传下去，
+# 后面靠 $PKG 的每一道闸门（零依赖纪律、对等测试）都在检查一个没有
+# kernel/composition/ui 的空目录，而且**全部静默报「通过」**——因为
+# 「目录不存在」和「目录存在但干净」在 grep -r 与 [ -d ] 面前长得一样。
+#
+# 判据换成「含 __init__.py 的目录」：egg-info 只有 PKG-INFO、SOURCES.txt
+# 这类元数据，没有 __init__.py；真正的包一定有。
+PKG="$(find "$P/src" -maxdepth 1 -mindepth 1 -type d 2>/dev/null \
+       | while read -r d; do [ -f "$d/__init__.py" ] && echo "$d"; done | head -1)"
 [ -n "$PKG" ] && run "零依赖纪律" "不变量1,2" bash "$CI/check_kernel_purity.sh" "$PKG" \
               || skip "零依赖纪律" "不变量1,2" "没有 src/<包>"
 
