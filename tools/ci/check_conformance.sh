@@ -21,7 +21,26 @@ RED=$'\033[31m'; GREEN=$'\033[32m'; OFF=$'\033[0m'
 [ -f "$P/swift/Package.swift" ] || { echo "尚不适用：还没有 swift/Package.swift —— 阶段 05 之前正常"; exit 2; }
 command -v swift >/dev/null 2>&1 || { echo "尚不适用：这台机器上没有 swift"; exit 2; }
 
-out="$(cd "$P/swift" && swift run -c release StructureKitVerify 2>&1)"
+# 目标名从正典的 meta.swift_core 派生（Thermo -> ThermoVerify）；派生不出来
+# 再去 Sources/ 下找唯一一个 *Verify。写死一个名字的版本在第二款 App 上就
+# 停了——它找的是别人的目标，而这道闸门会报「未通过」而不是「找不到」。
+VERIFY="$(python3 -c '
+import json, sys
+try:
+    core = json.load(open(sys.argv[1]))["meta"]["swift_core"]
+    print(f"{core}Verify")
+except Exception:
+    pass
+' "$P/spec/specification.json" 2>/dev/null)"
+if [ -z "$VERIFY" ]; then
+    VERIFY="$(basename "$(ls -d "$P"/swift/Sources/*Verify 2>/dev/null | head -1)" 2>/dev/null)"
+fi
+if [ -z "$VERIFY" ] || [ ! -d "$P/swift/Sources/$VERIFY" ]; then
+    echo "尚不适用：找不到 conformance 可执行目标（期望 swift/Sources/<Core>Verify）"
+    exit 2
+fi
+
+out="$(cd "$P/swift" && swift run -c release "$VERIFY" 2>&1)"
 code=$?
 echo "$out" | grep -vE '^\[|^Building|^Compiling|^Fetching|^Build (of|complete)'
 if [ $code -ne 0 ]; then

@@ -51,13 +51,30 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import load as load_config          # noqa: E402
+
 GREEN, RED, YELLOW, BOLD, OFF = (
     "\033[32m", "\033[31m", "\033[33m", "\033[1m", "\033[0m")
 
 LAYERS = ("examples", "layer1-printed", "layer5-secondsource")
 
 #: `source` 里的一个词 -> 教材 PDF 的 glob。书在仓库外，按关键词找。
-BOOKS = {
+#:
+#: **这张表是项目配置，不是工具链常量。** 它原先是写死的一份 StructureOne
+#: 书单（Durka / Olsson / Chajes / Bucciarelli / NASA），而 tools/ci 是四款
+#: App 共用的一份真身：另外三款的 `source` 关键词一个都不在表里，于是每一
+#: 行都判「来源不是本机的书」，闸门报一行「一行都没查到」的跳过——不是
+#: 「查过了都对」，但在日志里长得一模一样。
+#:
+#: 所以书单写进项目根的 ci.toml：
+#:
+#:     [citation_books]
+#:     durka = "*Durka*.pdf"
+#:     nasa  = "*Astronautic*.pdf"
+#:
+#: 下面这份只是**读不到配置时的回落**，保持 StructureOne 原有行为不变。
+DEFAULT_BOOKS = {
     "durka": "*Durka*.pdf",
     "olsson": "*Olsson*.pdf",
     "chajes": "*Chajes*.pdf",
@@ -66,6 +83,7 @@ BOOKS = {
     "astronautic": "*Astronautic*.pdf",
     "tm x-73305": "*Astronautic*.pdf",
 }
+BOOKS = dict(DEFAULT_BOOKS)
 
 #: 每一页重复印着的页眉——文件名、日期、页码——不是这一页的内容，是这份
 #: PDF 每一页都有的装订线。留着它们，一个短数字去撞上日期或页码的机会高得
@@ -189,7 +207,21 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.resolve()
-    refs = args.refs or root.parent / "Structural Mechanics Calculator"
+
+    # 项目形状读 ci.toml。三样东西曾经写死在这里，而三样都是**项目的**事：
+    # 参考书放在哪、`source` 关键词怎么对应到 PDF、测试数据在哪一层。
+    # 写死的那一版把姊妹项目的目录名（"Structural Mechanics Calculator"）
+    # 烙在共用脚本里，其余三款一律找不到书。
+    cfg = load_config(root)
+    global BOOKS
+    BOOKS = dict(cfg.get("citation_books") or DEFAULT_BOOKS)
+
+    refs = args.refs or cfg.path("citation_refs_dir")
+    if refs is None:
+        refs = root.parent / "Structural Mechanics Calculator"
+
+    tests_dir = cfg.path("tests_dir") or (root / "tests")
+    data = tests_dir / "data"
 
     try:
         from pypdf import PdfReader
@@ -200,7 +232,12 @@ def main() -> int:
     if args.self_test:
         return self_test(root, refs, PdfReader)
 
-    return run(root / "tests" / "data", refs, PdfReader)
+    if not data.is_dir():
+        print(f"尚不适用：找不到测试数据目录 {data}"
+              f"（ci.toml 的 tests_dir 可以点名它）", file=sys.stderr)
+        return 2
+
+    return run(data, refs, PdfReader)
 
 
 def run(data: Path, refs: Path, PdfReader) -> int:

@@ -401,8 +401,161 @@ def check_branch_coverage(roots: list[Path], threshold: float = 95.0) -> Criteri
 
 
 # ── 判据 7：教材章内例题 100% ──────────────────────────────────
+#
+# **这条判据一度名不副实。** 它叫「通过率 100%」，做的却只是「目录里有没有
+# 对得上正典的 CSV」——一行都不求值。于是 MechanicsOne 出现过这样一幕：
+# 转录是对的、这道闸门是绿的、内核是错的（叠合梁差 7 倍、曲梁中性半径 2.7%
+# 连带应力差 36%、组合剪应力 3.4%），而**套件里没有任何东西把两者比一次**。
+#
+# 这与「手写移植清单谎报 79/79」「空的 test_deflection_curve.py」是同一族的
+# 第三次发生：**fixture 的计数不是对 fixture 的检查。**
+#
+# 现在它真的跑：找出读 examples/ 的测试文件，执行它们，非 100% 判红，
+# 并打印求值了几行——**零行不是通过**。
+#
+# 没有任何测试读 examples/ 的项目退化成「尚不适用」并说明缺什么，
+# 而不是变红：本条的新做法不该把姊妹项目弄红。但那句「尚不适用」本身就是
+# 报告——它说的正是「这些 fixture 没有人读」。
 
-def check_examples(spec: dict, data_root: Path, strict: bool) -> Criterion:
+#: 求值一次最多等多久。挂住的套件不是通过。
+EXAMPLE_RUN_TIMEOUT_S = 900
+
+#: junit 里参数化 id 的括号部分，如 ``[M03-modulus-of-toughness]``。
+PARAM_ID = re.compile(r"\[([^\[\]]+)\]\s*$")
+
+
+def example_rows(data_root: Path) -> dict[str, set[str]]:
+    """``{module_id: {tag, ...}}`` —— 磁盘上真实存在的例题行。
+
+    只认 CSV，且按转录层的长表约定读 ``tag`` 列。读不出 tag 的文件记成一个
+    空集合：它仍然是一个 module 的 fixture，只是无法逐行核对。
+    """
+    import csv
+    import io
+
+    out: dict[str, set[str]] = {}
+    for module, files in example_modules(data_root).items():
+        tags = out.setdefault(module, set())
+        for f in files:
+            if f.suffix.lower() != ".csv":
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            body = [line for line in io.StringIO(text)
+                    if not line.lstrip().startswith("#")]
+            for row in csv.DictReader(body):
+                tag = (row.get("tag") or "").strip()
+                if tag:
+                    tags.add(tag)
+    return out
+
+
+def example_runners(package: Path, data_root: Path) -> list[Path]:
+    """哪些测试文件读 examples/ —— 由 AST 问出来，不是写在这里的一张名单。
+
+    判据：文件里出现过字面量 ``"examples"``（或以它结尾的路径字面量），
+    并且它定义了至少一个 ``test_`` 函数。两项都要，因为
+    ``max_examples=300`` 这种关键字不是字符串字面量，而一个只 import 不
+    测试的辅助模块不该被当成 runner。
+    """
+    tests = package / "tests"
+    if not tests.is_dir():
+        return []
+    found: list[Path] = []
+    for f in sorted(tests.rglob("*.py")):
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except (SyntaxError, OSError):
+            continue
+        reads = any(
+            isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and (n.value == EXAMPLES_DIR
+                 or n.value.endswith("/" + EXAMPLES_DIR)
+                 or f"/{EXAMPLES_DIR}/" in n.value)
+            for n in ast.walk(tree))
+        if not reads:
+            continue
+        if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name.startswith("test_") for n in ast.walk(tree)):
+            found.append(f)
+    return found
+
+
+def judge_example_run(xml_text: str, rows: dict[str, set[str]]
+                      ) -> tuple[int, int, int, int, list[str]]:
+    """把一次 junit 结果判成 (用例数, 不通过数, 对上的行数, 磁盘行数, 缺失)。
+
+    分出来是为了让 ``--self-test`` 能拿三份已知不合格的 XML 喂它，证明这道
+    检查真的会红——规范：凡「没找到问题就算通过」的检查，都必须有一个已知
+    会失败的样本证明它真的在工作。
+    """
+    import xml.etree.ElementTree as ET
+
+    misses: list[str] = []
+    on_disk = {(m, t) for m, tags in rows.items() for t in tags}
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        return 0, 0, 0, len(on_disk), [f"junit 结果无法解析：{exc}"]
+
+    cases = [c for c in root.iter("testcase")]
+    bad = [c for c in cases
+           if c.find("failure") is not None or c.find("error") is not None]
+
+    named: set[tuple[str, str]] = set()
+    for case in cases:
+        hit = PARAM_ID.search(case.get("name") or "")
+        if not hit:
+            continue
+        text = hit.group(1)
+        for module in rows:
+            prefix = module + "-"
+            if text.startswith(prefix) and text[len(prefix):] in rows[module]:
+                named.add((module, text[len(prefix):]))
+
+    for case in bad:
+        misses.append(f"例题不通过：{case.get('classname', '')}::{case.get('name', '')}")
+    if not cases:
+        misses.append("求值了 0 个用例 —— 零行不是通过：读 examples/ 的测试"
+                      "文件跑起来一个用例都没有")
+    # 逐行核对只在 runner 确实用「模块-tag」做参数化 id 时才有意义；
+    # 一个不参数化的 runner 报 0 行，那不是覆盖缺口，是量不出来。
+    if named:
+        for module, tag in sorted(on_disk - named):
+            misses.append(f"{module}/{tag} 这一行没有任何用例读过它")
+    return len(cases), len(bad), len(named), len(on_disk), misses
+
+
+def run_examples(package: Path, runners: list[Path]) -> tuple[str, str]:
+    """跑一次 runner，回 (junit XML, 出错说明)。"""
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "examples.xml"
+        cmd = [sys.executable, "-m", "pytest", "-q", "--no-header",
+               "-p", "no:cacheprovider", "-p", "no:randomly",
+               "--junitxml", str(report),
+               *[str(f.relative_to(package)) for f in runners]]
+        try:
+            done = subprocess.run(cmd, cwd=package, capture_output=True,
+                                  text=True, timeout=EXAMPLE_RUN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return "", (f"求值超时（{EXAMPLE_RUN_TIMEOUT_S}s）—— 挂住的套件"
+                        f"不是通过")
+        except OSError as exc:
+            return "", f"跑不起来 pytest：{exc}"
+        if not report.exists():
+            tail = (done.stderr or done.stdout or "").strip().splitlines()[-8:]
+            return "", ("pytest 没有产出 junit 结果（收集期就失败了？）："
+                        + " / ".join(tail))
+        return report.read_text(encoding="utf-8"), ""
+
+
+def check_examples(spec: dict, data_root: Path, package: Path,
+                   strict: bool) -> Criterion:
     c = Criterion(7, "教材章内例题通过率 100%")
     ex = example_modules(data_root)
     if not ex:
@@ -416,8 +569,37 @@ def check_examples(spec: dict, data_root: Path, strict: bool) -> Criterion:
     if strict:
         uncovered = sorted(ids - set(ex))
         c.misses += [f"{m} 没有章内例题" for m in uncovered]
+
+    rows = example_rows(data_root)
+    n_rows = sum(len(t) for t in rows.values())
+    runners = example_runners(package, data_root)
+    if not runners:
+        # 姊妹项目可能还没写这一遍比对。报「尚不适用」并说清缺什么，
+        # 而不是拿本项目的新做法把它弄红——但也不假装它通过了。
+        c.passed = not c.misses
+        if c.misses:
+            return c
+        c.skipped = True
+        c.skip_reason = (
+            f"{len(ex)} 个 module、{n_rows} 行例题在盘上，"
+            f"而 {package.name}/tests/ 里没有任何测试读 {EXAMPLES_DIR}/ —— "
+            f"通过率无从求值。**这些 fixture 目前没有人读**："
+            f"要让这条判据名副其实，需要一个逐行喂进内核的比对测试")
+        return c
+
+    xml, why = run_examples(package, runners)
+    if not xml:
+        c.misses.append(why)
+        c.detail = f"{len(ex)} 个 module 有例题；求值失败"
+        return c
+    cases, bad, named, on_disk, misses = judge_example_run(xml, rows)
+    c.misses += misses
     c.passed = not c.misses
-    c.detail = (f"{len(ex)} 个 module 有例题"
+    rate = 100.0 * (cases - bad) / cases if cases else 0.0
+    where = "、".join(f.name for f in runners)
+    c.detail = (f"{len(ex)} 个 module 有例题；跑 {where}："
+                f"求值 {cases} 个用例、逐行对上 {named}/{on_disk} 行，"
+                f"通过率 {rate:.1f}%"
                 + ("（--strict-examples：要求每个 module 都有）" if strict else ""))
     return c
 
@@ -515,6 +697,58 @@ def render(f: Findings) -> None:
     print()
 
 
+# ── 自检：这道闸门自己会不会红 ──────────────────────────────────
+#
+# 规范：**凡「没找到问题就算通过」的检查，都必须有一个已知会失败的样本证明
+# 它真的在工作。** 判据 7 曾经整整一个开发期都报绿，而它一行都没求值——
+# 那正是「静默放行」的样子。下面四份样本各针对一种失效方式。
+
+#: (名字, junit XML, 磁盘上的行, 期望这份样本被判成不合格)
+SELF_TEST_SAMPLES: tuple[tuple[str, str, dict[str, set[str]], bool], ...] = (
+    ("一个用例红了 —— 通过率不是 100%",
+     '<testsuite><testcase classname="t" name="k[M01-a]">'
+     '<failure message="got 7 want 3"/></testcase></testsuite>',
+     {"M01": {"a"}}, True),
+    ("一个用例 error 了 —— 收集期炸掉也不是通过",
+     '<testsuite><testcase classname="t" name="k[M01-a]">'
+     '<error message="ImportError"/></testcase></testsuite>',
+     {"M01": {"a"}}, True),
+    ("跑了 0 个用例 —— 零行不是通过",
+     '<testsuite></testsuite>', {"M01": {"a"}}, True),
+    ("跑了，但盘上有一行没有任何用例读过它",
+     '<testsuite><testcase classname="t" name="k[M01-a]"/></testsuite>',
+     {"M01": {"a", "b"}}, True),
+    ("全绿、逐行齐全 —— 这一份必须被判成合格，否则这道闸门是在乱叫",
+     '<testsuite><testcase classname="t" name="k[M01-a]"/>'
+     '<testcase classname="t" name="k[M01-b]"/></testsuite>',
+     {"M01": {"a", "b"}}, False),
+)
+
+
+def self_test() -> int:
+    """把五份已知结论的样本喂给判据 7 的判定函数。"""
+    bad = 0
+    for name, xml, rows, should_fail in SELF_TEST_SAMPLES:
+        cases, failures, named, on_disk, misses = judge_example_run(xml, rows)
+        rejected = bool(misses)
+        ok = rejected == should_fail
+        bad += not ok
+        mark = f"{GREEN}✓{OFF}" if ok else f"{RED}✗{OFF}"
+        verb = "判为不合格" if rejected else "判为合格"
+        print(f"  {mark} {name}\n      -> {verb}"
+              f"（{cases} 用例 / {failures} 红 / {named} 行对上 / {on_disk} 行在盘）")
+        for m in misses[:3]:
+            print(f"         {m}")
+    print()
+    if bad:
+        print(f"{RED}{BOLD}自检未通过：{bad} 份样本判错。"
+              f"这道闸门现在不能相信。{OFF}\n")
+        return 1
+    print(f"{GREEN}{BOLD}自检通过：判据 7 的判定函数对五份已知样本"
+          f"给出了正确结论。{OFF}\n")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -526,7 +760,13 @@ def main() -> int:
     ap.add_argument("--strict-examples", action="store_true",
                     help="要求每个 module 都有章内例题")
     ap.add_argument("--coverage-threshold", type=float, default=95.0)
+    ap.add_argument("--self-test", action="store_true",
+                    help="拿已知不合格的样本证明判据 7 真的会红")
     args = ap.parse_args()
+
+    if args.self_test:
+        print(f"\n{BOLD}判据 7 自检{OFF}\n")
+        return self_test()
 
     project = args.project.resolve()
     spec = load_spec(project)
@@ -582,7 +822,8 @@ def main() -> int:
                                            spec, data_root, package))
     f.criteria.append(check_branch_coverage([project, package],
                                             args.coverage_threshold))
-    f.criteria.append(check_examples(spec, data_root, args.strict_examples))
+    f.criteria.append(check_examples(spec, data_root, package,
+                                     args.strict_examples))
     f.notes += check_golden_rule(package, data_root)
     f.notes += check_source_records(data_root)
 

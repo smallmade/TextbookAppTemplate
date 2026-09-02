@@ -9,12 +9,32 @@
 剥什么、不剥什么：
 
   - 每个 module 的 citation ——— 全剥。它是维护依据，不是产品内容。
-  - 受版权来源的 author / title —— 剥。作者名与书名出现在商业软件里可能被
-    读作背书或关联。
-  - **公有领域来源的 author / title —— 不剥。** NACA / NASA / NIST 具名反而
-    增强可信度且零法律风险，这是规范阶段 06 三层规则里明写的一类。
+  - **受版权来源：整条从 sources[] 移除。**（M-F1，2026-09-02）
+  - **公有领域来源 —— 整条保留，含 author / title。** NACA / NASA / NIST
+    具名反而增强可信度且零法律风险，这是规范阶段 06 三层规则里明写的一类。
 
-判据是来源自己的 ship 字段，不是字段名。
+判据是来源自己的 ship 字段与 licence，不是字段名。
+
+──────────────────────────────────────────────────────────────
+[M-F1] 为什么从「剥两个字段」改成「整条删除」。
+
+上一版只剥 `author` 与 `title`，于是出货正典里留着这样一条：
+
+    {"key": "primary-a-solutions", "edition": "10th", "year": 2017,
+     "role": "adaptation-audit", "licence": "copyrighted", "ship": false}
+
+姓名和书名确实没了。但 **「10th / 2017」这个组合在这个学科里能反查到唯一
+一本书**，而 `role: "adaptation-audit"` 还额外声明了「用过它的解答手册」。
+剥字段是按【我想得到的那几个字段】剥的；一条记录的**存在本身**就是标识，
+而没有任何一个字段名叫「存在」。
+
+> 凡是「按字段名剥离」的机制，都会在你没想到的字段上失效。
+> 对整条记录，唯一稳的操作是删掉它。
+
+删掉之后 `check_spec.py --shipped` 仍然通过：它要求 sources ≥ 2 且含一笔
+`role=independent-check`，而公有领域的第二源正是那一笔——受版权的主教材从
+来不是。这不是巧合：**出货正典该说的就是「这些数是拿什么公开资料核对过的」，
+不是「作者读过哪几本书」。**
 
 剥完之后还要做一件事，而且它比剥离本身重要：**把剥离前的作者姓氏当成
 禁用词，回头扫一遍整份剥离后的 JSON。** 第一次跑这个脚本时，author 与
@@ -30,6 +50,17 @@ import sys
 from pathlib import Path
 
 SOURCE_FIELDS = ("author", "title", "note")
+
+
+def ships(source: dict) -> bool:
+    """这一笔来源可以进出货正典吗？
+
+    两个条件都要满足，不是任一：`ship` 明确为 true，且 `licence` 不是
+    copyrighted。写成合取是因为这两个字段曾经不一致过，而不一致时该信的
+    是更严的那一个——一份正典把某本教材标成 `ship: true` 的那天，谁也不会
+    收到通知。
+    """
+    return source.get("ship") is True and source.get("licence") != "copyrighted"
 
 
 def forbidden_terms(spec: dict) -> set:
@@ -97,12 +128,16 @@ def strip(spec: dict) -> dict:
         if not touched:
             unhandled.append(rule)
 
-    for s in out.get("sources", []):
-        if s.get("ship") is True:               # 公有领域：具名是资产，留着
-            continue
-        for f in SOURCE_FIELDS:
-            if f"sources[].{f}" in rules:
-                s.pop(f, None)
+    # [M-F1] 整条删除，不是逐字段剥离。见文件头。
+    #
+    # `sources[].author` / `sources[].title` 这类规则仍然要被视为「已执行」——
+    # 删掉整条比剥掉那个字段更强——否则下面的 unhandled 会对着一条其实
+    # 已经生效的规则报错。
+    if "sources" in out:
+        kept = [s for s in out["sources"] if ships(s)]
+        removed = [s.get("key", "?") for s in out["sources"] if not ships(s)]
+        out["sources"] = kept
+        out.setdefault("build", {})["sources_removed_on_ship"] = len(removed)
 
     if unhandled:
         raise ValueError(
@@ -128,8 +163,12 @@ def main() -> int:
         print("自检失败：剥离前后完全相同 —— strip_on_ship 没有生效", file=sys.stderr)
         return 2
     leaked = [m["id"] for m in out.get("modules", []) if "citation" in m]
-    leaked += [s.get("key", "?") for s in out.get("sources", [])
-               if s.get("ship") is not True and any(f in s for f in SOURCE_FIELDS)]
+    # [M-F1] 判据从「受版权来源仍带 author/title」改成「受版权来源还在」。
+    # 前一条判据放行了 `{"edition": "10th", "year": 2017,
+    # "role": "adaptation-audit", "licence": "copyrighted"}` —— 姓名书名都
+    # 剥了，那条记录仍然指向唯一一本书，还写着用过它的解答手册。
+    leaked += [f'sources[{s.get("key", "?")}] 整条仍在'
+               for s in out.get("sources", []) if not ships(s)]
     if leaked:
         print(f"自检失败：这些条目仍带受版权字段 {leaked}", file=sys.stderr)
         return 1
@@ -145,10 +184,19 @@ def main() -> int:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-    kept = [s.get("title", "?") for s in out.get("sources", []) if s.get("ship") is True]
+    kept = [s.get("title", "?") for s in out.get("sources", []) if ships(s)]
+    dropped = [s.get("key", "?") for s in spec.get("sources", []) if not ships(s)]
     print(f"剥离完成 → {dst}")
     print(f"  citation 已剥离：{len(spec.get('modules', []))} 个 module")
+    print(f"  受版权来源整条删除：{len(dropped)} 笔  {dropped}")
     print(f"  具名保留的公有领域来源：{len(kept)} 笔")
+    print(f"CHECKED n={len(spec.get('modules', []))} unit=个 module  —— "
+          f"本次处理了 {len(spec.get('modules', []))} 个 module、"
+          f"{len(spec.get('sources', []))} 笔来源")
+    if not spec.get("modules"):
+        print("自检失败：正典里一个 module 都没有——剥了个空文件不算剥离",
+              file=sys.stderr)
+        return 1
     print("下一步（不许跳过）：check_spec.py --shipped 验这份剥离后的副本")
     return 0
 

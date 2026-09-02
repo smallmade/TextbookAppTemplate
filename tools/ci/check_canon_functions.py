@@ -33,6 +33,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import load as load_config          # noqa: E402
+
 
 def references(node: object, out: set[str]) -> None:
     if isinstance(node, dict):
@@ -104,10 +107,21 @@ def resolve(ref: str, package: str) -> tuple[bool, str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("canon", type=Path)
-    ap.add_argument("--python", type=Path, default=Path("python/src"))
+    # 缺省值读 ci.toml 的 python_src_dir。写死 "python/src" 是 MechanicsOne
+    # 的形状；共用工具链里写死任何一款的形状，其余几款就会在「找不到东西」
+    # 与「查过了没问题」之间无声地滑向后者。命令行仍然优先。
+    ap.add_argument("--python", type=Path, default=None)
+    ap.add_argument("--root", type=Path, default=Path("."))
     ap.add_argument("--package", default=None,
                     help="根包名；缺省由 --python 下唯一的包目录推断")
     args = ap.parse_args()
+    if args.python is None:
+        cfg = load_config(args.root.resolve())
+        args.python = cfg.path("python_src_dir") or (args.root / "python/src")
+    if not args.python.is_dir():
+        print(f"尚不适用：找不到 Python 源目录 {args.python}"
+              f"（ci.toml 的 python_src_dir 可以点名它）", file=sys.stderr)
+        return 2
     sys.path.insert(0, str(args.python.resolve()))
 
     package = args.package
