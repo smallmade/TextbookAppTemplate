@@ -228,6 +228,33 @@ def gather(root: Path) -> tuple[list[str], int]:
     return faults, total
 
 
+def layer5_modules(root: Path) -> set[str]:
+    """Which modules the **second source** actually reaches.
+
+    Counted over ``layer5-secondsource`` alone, never over the transcribed
+    layers as a whole. Layer 1's printed tables and criterion 1b's worked
+    examples are transcribed from the same manual and policed by the same
+    rules, but they are not layer 5: what makes layer 5 the only layer
+    independent of the primary textbooks is *what it is compared against*,
+    not *how it was typed in*. Summing all three would report a coverage that
+    the one layer with that property does not have.
+    """
+    roots = (root / "tests" / "data", root / "python" / "tests" / "data")
+    data = next((path for path in roots if path.is_dir()), None)
+    if data is None:
+        return set()
+    directory = data / "layer5-secondsource"
+    if not directory.is_dir():
+        return set()
+    found: set[str] = set()
+    for fixture in sorted(directory.glob("*.csv")):
+        for row in read_rows(fixture.read_text(encoding="utf-8")):
+            module = (row.get("module") or "").strip()
+            if module:
+                found.add(module)
+    return found
+
+
 #: Six fixtures that must each be rejected, and the rule that must catch them.
 BAD = [
     ("L5-6", "printing fault with no reason",
@@ -317,14 +344,59 @@ def self_test() -> int:
               f"{form} row")
         ok &= quiet
 
+    ok &= _self_test_coverage()
     print("\n自检通过——闸门确实在工作" if ok else "\n自检失败——闸门不会报警")
     return 0 if ok else 1
+
+
+def _self_test_coverage() -> bool:
+    """The module count must be counted, and counted over layer 5 alone.
+
+    Two ways this could pass while being useless: counting nothing (always
+    below the floor, so it fires on everything and gets switched off), and
+    counting the other transcribed layers too (so a project with one layer-5
+    module and twenty printed-table modules reports twenty).
+    """
+    import tempfile
+
+    header = ("module,tag,page_pdf,page_printed,section,quantity,unit,"
+              "published,expected,verdict,adjudication\n")
+
+    def row(module: str) -> str:
+        return f"{module},t,1,1-1,1.1,q,u,1,1,agrees,\n"
+
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp) / "python" / "tests" / "data"
+        five = data / "layer5-secondsource"
+        one = data / "layer1-printed"
+        for directory in (five, one):
+            directory.mkdir(parents=True)
+            (directory / "SOURCE.md").write_text("A-1 is adjudicated here.")
+        (five / "a.csv").write_text(header + row("M01") + row("M02"))
+        # 层 1 里放三个【层 5 没有的】module：若实现把三层加在一起数，
+        # 下面这条断言会变成 5，样本就会失败——这正是它存在的理由。
+        (one / "b.csv").write_text(header + row("M77") + row("M78") + row("M79"))
+
+        found = layer5_modules(Path(tmp))
+        right = found == {"M01", "M02"}
+        print(f"  {'PASS' if right else 'FAIL'}  ----  只数 layer5-secondsource，"
+              f"不把层 1 / 例题加进来（数到 {sorted(found)}）")
+        ok &= right
+
+        blank = layer5_modules(Path(tmp) / "nowhere")
+        print(f"  {'PASS' if not blank else 'FAIL'}  ----  没有层 5 目录时数到零")
+        ok &= not blank
+    return ok
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", type=Path)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--min-layer5-modules", type=int, default=None,
+                        help="层 5 至少要覆盖多少个 module。不给就不查——"
+                             "覆盖率目标是各项目自己的事，纪律才是共用的")
     args = parser.parse_args()
 
     if args.self_test:
@@ -344,6 +416,18 @@ def main() -> int:
         return 2
     print(f"转录层裁定纪律 ✓  {total} 行，每一行都有页码、裁定与出处"
           f"（层 1 印刷表 + 层 5 第二源）")
+
+    # 覆盖率这一条是【单独查的】，而且只数 layer5-secondsource。
+    # 写在这里而不是写在台账的备注里，是因为备注不会变红：一个只存在于
+    # 散文里的门槛，在下一次有人删掉两行 fixture 时不会有任何反应。
+    if args.min_layer5_modules is not None:
+        reached = layer5_modules(args.root)
+        if len(reached) < args.min_layer5_modules:
+            print(f"✗ 层 5 只覆盖 {len(reached)} 个 module，要求 ≥ "
+                  f"{args.min_layer5_modules}：{' '.join(sorted(reached))}")
+            return 1
+        print(f"✓ 层 5 覆盖 {len(reached)} 个 module（要求 ≥ "
+              f"{args.min_layer5_modules}）")
     return 0
 
 

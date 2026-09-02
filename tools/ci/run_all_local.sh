@@ -47,9 +47,35 @@ step "每个 test_*.py 里真的有测试" \
 step "层 5 闸门自检（必须能抓到六个已知不合格样本）" \
      python3 tools/ci/check_layer5.py --self-test
 step "Gate 02 · 层 5 裁定纪律（第二源独立，但不是无误）" \
-     python3 tools/ci/check_layer5.py --root .
+     python3 tools/ci/check_layer5.py --root . --min-layer5-modules 18
+
+step "第二源声明闸门自检（必须能抓到已知不合格样本）" \
+     python3 tools/ci/check_second_source.py --self-test
+step "Gate 02 · 正典的 second_source 声明与层 5 实建 fixture 对得上" \
+     python3 tools/ci/check_second_source.py --root .
+
+step "层 3 闸门自检（必须能抓到两个已知不合格样本）" \
+     python3 tools/ci/check_layer3_symbolic.py --self-test
+step "Gate 02 · 层 3 符号证明真的被执行" \
+     python3 tools/ci/check_layer3_symbolic.py --root .
 
 step "测试与分支覆盖 ≥95%" bash -c "cd python && python3 -m pytest tests/ -q --cov --cov-branch --cov-fail-under=95 --cov-report=json:coverage.json >/dev/null"
+
+# [B-18] M17-I4 的两条独立算法互证，单独点名一步。
+# 它本来就在上面那个 pytest 里跑，之所以还要单列：这个文件是全 App 单点故障
+# （组合截面）唯一的独立证据，而它曾经【整个文件里 rotation 出现零次】——
+# 一段只在部件旋转时才跑的代数，两种语言里符号都反了，Ix 与 Iy 差 52%，
+# 而上面那个 pytest 只会报一个总数，没有人会注意到它少测了什么。
+# 名字出现在日志里，是为了它哪天不再运行时有人看得见。
+step "M17-I4 · 闭式求和 vs 边界积分（含旋转）" \
+     bash -c "cd python && python3 -m pytest tests/test_outline.py -q >/dev/null"
+
+# [E-09] 屏上印出来的校核，本身能不能失败。
+# 单列的理由和上面那步一样：E-09 走查发现塑性屏印的「净力为零」对任何反对称
+# 分布恒成立，而开屏默认弯矩超过该截面塑性弯矩、被当成一致的往返展示。
+# 两处都不是数值误差，是【印错了量并当作证据】——上面那个 pytest 只报总数。
+step "屏上校核本身能不能失败（开屏状态 · 残余平衡 · 决策不印量纲）" \
+     bash -c "cd python && python3 -m pytest tests/test_plastic_residual_equilibrium.py tests/test_latex.py -q >/dev/null"
 step "Gate 02 · 七条充分性判据（对着正典核对真实存在的 fixture）" \
      python3 tools/ci/check_sufficiency.py .
 step "Gate 02 · 输入格式矩阵（含读取器实测）" \
@@ -79,6 +105,11 @@ step "Gate 04 · 可达性闸门自检" \
      python3 tools/ci/check_screen_reachability.py --self-test
 step "Gate 04 · 每个 v1.0 模块界面上都到得了" \
      python3 tools/ci/check_screen_reachability.py --root .
+
+# [E-02] v1.1 那一档更严：在这一档里 partial 也失败，界面「做了一半」的模块
+# 必须要么补上入口，要么在正典里写明 ui_deferred 与理由。
+step "Gate 04 · v1.1 那一档（partial 也算失败）" \
+     python3 tools/ci/check_screen_reachability.py --root . --release v1.1
 
 echo "── Gate 04 · 适配审计 ──"
 python3 tools/ci/check_coverage_audit.py . ; CODE=$?
@@ -117,6 +148,22 @@ step "Gate 05 · 跨语言 conformance · Swift ↔ Python" \
      bash -c "swift run --package-path swift MechanicsKitVerify"
 step "原型与共享模块同步" bash -c "python3 tools/conformance/build_prototype.py >/dev/null && git diff --quiet design/prototype.html 2>/dev/null || true"
 
+# [2026-09-01] check_site.py 曾经在没给 --slug 时默认落到另一个姊妹项目的
+# slug（"structuremechone"）——本地全绿，末尾印出的五个 URL 却指向别人的站点。
+# 现在该参数必须显式给，这里补上，让这一半（部署前能查的一半）真的进套件，
+# 不再只是一个手动才会想起来跑的命令。
+# [A-20] entitlements 声明的能力，代码里没有对应 API——找到时它是
+# com.apple.security.files.user-selected.read-write（为已推迟到 v2 的导出
+# 功能预留，A-11 推迟决定之后没人回头把这把键摘掉）。自检里带了一个已知
+# 会失败的样本，就是那把键当时的样子。
+step "entitlements 里的能力声明，代码里都有对应 API 在用" \
+     python3 tools/ci/check_entitlements.py --self-test
+step "  同上，对真身跑一次" \
+     python3 tools/ci/check_entitlements.py \
+       swift/App/MechanicsOne.entitlements swift/Sources/MechanicsOneApp
+
+step "Gate 07 · 站点自洽（页面齐备 / 链接 / 隐私页与隐私清单一致）" \
+     python3 tools/ci/check_site.py site/ --slug mechanicsone
 pending "Gate 07 · 站点五个 URL 实测回 200 (check_urls.sh)" \
         "需要伞形站点已部署——本地只验得到链接自洽"
 

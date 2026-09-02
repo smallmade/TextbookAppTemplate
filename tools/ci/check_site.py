@@ -28,7 +28,16 @@ LINK = re.compile(r'href="([^"#]+)', re.I)
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("site", type=Path)
-    ap.add_argument("--slug", default="structuremechone")
+    # [shared] No default. This used to default to "structuremechone" -- one
+    # sibling project's own slug baked into the shared template -- so any
+    # other app that forgot the flag got a clean, confident, wrong report:
+    # every check passed, and the five URLs printed at the end pointed at
+    # StructureOne's site, not its own. Silent and plausible is worse than
+    # loud and wrong; `required=True` is the fix, matching the usage example
+    # in this file's own docstring.
+    ap.add_argument("--slug", required=True,
+                    help="this project's own site slug -- there is no "
+                        "sensible default across sibling projects")
     ap.add_argument("--manifest", type=Path,
                     default=Path("swift/App/PrivacyInfo.xcprivacy"))
     args = ap.parse_args()

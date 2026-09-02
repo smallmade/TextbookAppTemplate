@@ -24,7 +24,17 @@ conformance 比对过、对等测试点过名、法律隔离扫过，**而界面
   * 一个模块的输出**一个都到不了**，则无论怎么内联都说明没有入口——
     这一档才失败。
 
-    python tools/ci/check_screen_reachability.py [--root .] [--write] [--self-test]
+`--release` 决定检查到哪一档：默认只看 `v1.0`，`--release v1.1` 把 v1.1 的
+模块也纳进来。**在 `--release` 明确点名的那一档里，`partial` 也失败**——
+因为一个模块的界面「做了一半」正是本仓库反复发生的事，只报告不失败等于
+没有闸门。
+
+一个模块可以在正典里写 `ui_deferred: "<理由>"` 免于这一条。但**免除会自检**：
+被标了 `ui_deferred` 的模块如果其实**全部输出都到得了**，闸门失败并要求把
+那行标记删掉。**一条过期的豁免和一条真的豁免，在日志里必须分得开。**
+
+    python tools/ci/check_screen_reachability.py [--root .] [--release v1.0|v1.1]
+                                                 [--write] [--self-test]
 """
 
 from __future__ import annotations
@@ -38,6 +48,41 @@ from pathlib import Path
 
 COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.S)
 COMMENT_LINE = re.compile(r"//[^\n]*")
+
+#: [A-12] Verified false positives -- the screen does show this quantity, but
+#: through a route more general than the specific closed form the canon
+#: originally pointed at.  Each was checked by hand: found the property that
+#: actually feeds the on-screen Readout, and confirmed it computes the same
+#: physical quantity by a broader method.  A miss NOT in this table is a real
+#: gap; one that is gets a reason printed instead of a bare accusation.
+#:
+#: Keyed by (module id, symbol) so a module can have both exempted and
+#: genuinely missing outputs without either hiding the other.
+EXEMPT: dict[tuple[str, str], str] = {
+    ("M21", "M_fix_a"):
+        "BeamSession.fixedMoment reads the general solver's own reactions "
+        "for whatever loads are configured, rather than evaluating the "
+        "single-uniform-load closed form the canon named -- the closed form "
+        "is one point the general solver already covers.",
+    ("M21", "M_fix_b"):
+        "Same solver, same reason: the single-point-load closed form is "
+        "another point the general solution already covers.",
+    ("M22", "sigma_max"):
+        "BendingSession.stressTop/stressBottom each evaluate the general "
+        "flexure formula at the section's own two extreme-fibre coordinates, "
+        "which is correct for an unsymmetric section and the closed form "
+        "(one shared c) is not.",
+    ("M27", "tau_max"):
+        "ShearStressScreen takes the peak of the scanned shear-through-depth "
+        "profile, which is right for an arbitrary built-up section; the "
+        "closed form only holds for a plain rectangle.",
+}
+#
+# Removed 2026-08-31: ("M46", "K_eff"). It was true when written -- the screen
+# only had a continuous K slider, so the four-named-conditions closed form was
+# never called. Then the Columns screen grew a readout that calls it, and the
+# entry became a lie nobody was checking. `stale_exemptions` now catches
+# exactly that, and caught this one.
 DECLARATION = re.compile(r"\b(?:func|var|let)\s+([A-Za-z_][A-Za-z0-9_]*)")
 #: Anything that can own a brace. Used only to bound the search for a body --
 #: a stored property must not be allowed to adopt the brace of the type that
@@ -113,10 +158,32 @@ def reachable(app_sources: list[str], kit_sources: list[str]) -> set[str]:
     return seen
 
 
-def classify(spec: dict, seen: set[str]) -> list[tuple[str, str, list[str], list[str]]]:
+#: Releases in order. ``--release v1.1`` means "v1.0 and v1.1", not "v1.1 only":
+#: a v1.1 check that quietly stopped covering v1.0 would be a worse gate than
+#: the one it replaced.
+RELEASES: tuple[str, ...] = ("v1.0", "v1.1")
+
+
+def in_release(module: dict, upto: str) -> bool:
+    """Is this module part of the release being checked?
+
+    ``tier == "core"`` still counts, regardless of the release label: that is
+    how the gate behaved before ``--release`` existed, and a module promoted to
+    core is by definition shipping.
+    """
+    if module.get("tier") == "core":
+        return True
+    release = module.get("release")
+    if release not in RELEASES:
+        return False
+    return RELEASES.index(release) <= RELEASES.index(upto)
+
+
+def classify(spec: dict, seen: set[str],
+             upto: str = "v1.0") -> list[tuple[str, str, list[str], list[str]]]:
     rows = []
     for module in spec["modules"]:
-        if module.get("tier") != "core" and module.get("release") != "v1.0":
+        if not in_release(module, upto):
             continue
         outputs = [(o["symbol"], o["function"])
                    for o in module.get("outputs", []) if o.get("function")]
@@ -149,6 +216,55 @@ def write_table(path: Path, rows) -> None:
         for mid, title, arrived, missing in rows:
             reach = "full" if not missing else ("none" if not arrived else "partial")
             writer.writerow([mid, title, reach, " ".join(arrived), " ".join(missing)])
+
+
+def split_exempted(
+        partial: list[tuple[str, str, list[str]]]
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, list[str]]]]:
+    """[A-12] ``(exempted (mid, sym) pairs, the real misses that remain)``."""
+    exempted = [(mid, sym) for mid, _, missing in partial for sym in missing
+               if (mid, sym) in EXEMPT]
+    real = [(mid, title, [s for s in missing if (mid, s) not in EXEMPT])
+           for mid, title, missing in partial]
+    return exempted, [(mid, title, missing) for mid, title, missing in real
+                      if missing]
+
+
+def stale_exemptions(rows) -> list[tuple[str, str]]:
+    """EXEMPT pairs whose symbol is now genuinely reachable.
+
+    The same rot `split_deferred` guards against, in the older table. An EXEMPT
+    entry says "the screen shows this by a more general route, so the specific
+    closed form never gets called". The day someone adds a Readout that *does*
+    call it, the entry stops being true -- and nothing was watching. It happened
+    on the first try: M46.K_eff went stale the moment the Columns screen grew a
+    K_eff readout, and only a hand check noticed.
+    """
+    reached = {(mid, sym) for mid, _, arrived, _ in rows for sym in arrived}
+    return sorted(pair for pair in EXEMPT if pair in reached)
+
+
+def split_deferred(
+        partial: list[tuple[str, str, list[str]]],
+        full: list[str],
+        deferred: dict[str, str],
+) -> tuple[list[tuple[str, str, list[str], str]], list[tuple[str, str, list[str]]],
+           list[str]]:
+    """Separate canon-declared UI deferrals from real gaps, and catch stale ones.
+
+    Returns ``(deferred rows, real gaps, stale markers)``.
+
+    A ``ui_deferred`` module whose outputs are **all** reachable is a stale
+    marker: the work got done and nobody deleted the excuse. It is returned
+    separately and fails the gate, because an exemption nobody re-checks is how
+    a gate stops meaning anything.
+    """
+    held = [(mid, title, missing, deferred[mid])
+            for mid, title, missing in partial if mid in deferred]
+    real = [(mid, title, missing) for mid, title, missing in partial
+            if mid not in deferred]
+    stale = sorted(mid for mid in deferred if mid in full)
+    return held, real, stale
 
 
 def self_test() -> int:
@@ -193,6 +309,70 @@ def self_test() -> int:
     good = "buried" not in reachable(["Pair(right: 1)"], kit3)
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  不可达  存储属性不认领下一个类型的体")
+
+    # [A-12] A known-exempt pair must be filtered out; an unlisted symbol in
+    # the same module must survive, so a real new gap cannot hide beside a
+    # verified old one.
+    exempted, real = split_exempted([("M27", "Shear", ["tau_max", "sigma_new"])])
+    good = exempted == [("M27", "tau_max")] and real == [
+        ("M27", "Shear", ["sigma_new"])]
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  分离  已核实的与未核实的不互相遮蔽")
+
+    exempted, real = split_exempted([("M22", "Bending", ["sigma_max"])])
+    good = exempted == [("M22", "sigma_max")] and real == []
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  分离  全部核实过的模块不再报告为缺口")
+
+    # [E-02] The same expiry check on the older EXEMPT table. A pair still
+    # unreachable stays exempt; one that became reachable is stale.
+    good = stale_exemptions([("M22", "Bending", [], ["sigma_max"])]) == []
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  放行  仍然走不到的 EXEMPT 条目")
+    good = stale_exemptions([("M22", "Bending", ["sigma_max"], [])]) == [
+        ("M22", "sigma_max")]
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  抓到  已经过期的 EXEMPT 条目")
+
+    # [E-02] --release scoping. A v1.1 module must be invisible at v1.0 and
+    # visible at v1.1; a core module must be visible at both, because that is
+    # how the gate behaved before the flag existed.
+    scope_cases = [
+        ({"tier": "extended", "release": "v1.1"}, "v1.0", False, "v1.1 模块在 v1.0 档外"),
+        ({"tier": "extended", "release": "v1.1"}, "v1.1", True, "v1.1 模块在 v1.1 档内"),
+        ({"tier": "core", "release": "v1.0"}, "v1.0", True, "core 模块在 v1.0 档内"),
+        ({"tier": "core", "release": "v1.1"}, "v1.0", True, "core 压过 release 标签"),
+        ({"tier": "extended", "release": "v2.0"}, "v1.1", False, "未来档不提前纳入"),
+    ]
+    for module, upto, want, label in scope_cases:
+        good = in_release(module, upto) == want
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  {'纳入' if want else '不纳入'}  {label}")
+
+    # [E-02] A partial module is a real gap unless the canon says otherwise...
+    held, real, stale = split_deferred(
+        [("M03", "Curve", ["U_t"]), ("M99", "Other", ["x"])], [], {"M03": "需要数据导入"})
+    good = ([m for m, _, _, _ in held] == ["M03"]
+            and [m for m, _, _ in real] == ["M99"] and stale == [])
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  分离  正典推迟的与真缺口不互相遮蔽")
+
+    # ...and a deferral whose module is now fully reachable is stale, not
+    # silently honoured. This is the sample that proves the exemption itself
+    # gets re-checked rather than trusted forever.
+    _, _, stale = split_deferred([], ["M03"], {"M03": "需要数据导入"})
+    good = stale == ["M03"]
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  抓到  已经过期的 ui_deferred")
+
+    # A deferral for a module that is neither partial nor full (no entry at
+    # all) must NOT be silently swallowed -- `none` fails before deferrals are
+    # consulted, and this records that ordering.
+    held, real, stale = split_deferred([], [], {"M03": "需要数据导入"})
+    good = held == [] and real == [] and stale == []
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  放行  一个入口都没有的模块不由 ui_deferred 处理")
+
     print("\n自检通过——闸门确实在工作" if ok else "\n自检失败")
     return 0 if ok else 1
 
@@ -200,6 +380,8 @@ def self_test() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=".", type=Path)
+    ap.add_argument("--release", default="v1.0", choices=RELEASES,
+                    help="检查到哪一档（含更早的档）；这一档里 partial 也失败")
     ap.add_argument("--write", action="store_true", help="刷新 posable 表")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
@@ -216,10 +398,14 @@ def main() -> int:
         print("尚不适用：Swift 侧或正典还不在 —— 阶段 05 之前正常", file=sys.stderr)
         return 2
 
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
     rows = classify(
-        json.loads(spec_path.read_text(encoding="utf-8")),
+        spec,
         reachable([p.read_text("utf-8") for p in app_dir.rglob("*.swift")],
-                  [p.read_text("utf-8") for p in kit_dir.rglob("*.swift")]))
+                  [p.read_text("utf-8") for p in kit_dir.rglob("*.swift")]),
+        args.release)
+    deferred = {m["id"]: m["ui_deferred"] for m in spec["modules"]
+                if m.get("ui_deferred")}
 
     if args.write:
         target = root / "docs" / "coverage-audit-posable.csv"
@@ -228,19 +414,66 @@ def main() -> int:
 
     none = [(i, t) for i, t, a, m in rows if not a]
     partial = [(i, t, m) for i, t, a, m in rows if a and m]
-    print(f"v1.0 模块 {len(rows)} 个 · 全部输出可达 "
-          f"{len(rows) - len(none) - len(partial)} · 部分 {len(partial)} · "
-          f"一个也到不了 {len(none)}")
-    for mid, title, missing in partial:
+    full_ids = [i for i, t, a, m in rows if a and not m]
+
+    # [A-12] Split each partial module's misses into verified-harmless and
+    # everything else, so a new gap cannot hide among old, checked ones.
+    exempted, real_partial = split_exempted(partial)
+    # [E-02] Then set aside the ones the canon says are deliberately deferred,
+    # and catch any deferral that has quietly gone stale.
+    held, real_partial, stale = split_deferred(real_partial, full_ids, deferred)
+
+    print(f"{args.release} 模块 {len(rows)} 个 · 全部输出可达 "
+          f"{len(rows) - len(none) - len(partial)} · 部分 {len(real_partial)}"
+          + (f"（另 {len(partial) - len(real_partial)} 个模块的缺口已核实为"
+             f"假阳性，见下）" if len(partial) > len(real_partial) else "")
+          + f" · 一个也到不了 {len(none)}")
+    for mid, title, missing in real_partial:
         print(f"  − {mid} {title[:40]:<40} 声明了但走不到：{', '.join(missing)}")
+    if exempted:
+        print(f"\n（另 {len(exempted)} 处已核实的假阳性，走的是更通用的路径，"
+              f"见 EXEMPT）：")
+        for mid, sym in exempted:
+            print(f"    {mid}.{sym}")
+    if held:
+        print(f"\n（另 {len(held)} 个模块的界面由正典明文推迟，"
+              f"字段 ui_deferred）：")
+        for mid, title, missing, why in held:
+            print(f"    {mid} {title[:36]:<36} {', '.join(missing)}")
+            print(f"        理由：{why}")
     if none:
-        print(f"\n✗ {len(none)} 个 v1.0 模块，界面上没有任何入口：")
+        print(f"\n✗ {len(none)} 个 {args.release} 模块，界面上没有任何入口：")
         for mid, title in none:
             print(f"    {mid}  {title}")
         print("  内核实现了、conformance 比对过、对等测试点过名——"
               "而用户走不到。前面每一道闸门都会是绿的。")
         return 1
-    print("✓ 每个 v1.0 模块都至少有一个输出到得了界面")
+    rotten = stale_exemptions(rows)
+    if rotten:
+        print(f"\n✗ {len(rotten)} 条 EXEMPT 豁免已经过期：")
+        for mid, sym in rotten:
+            print(f"    {mid}.{sym}  这个符号现在真的到得了，"
+                  f"请把 EXEMPT 里那一条删掉")
+        print("  豁免说的是「界面走的是更通用的路径，这个闭式永远不会被调用」。"
+              "有人加了一个读数真的调它，那句话就不再成立了。")
+        return 1
+    if stale:
+        print(f"\n✗ {len(stale)} 条 ui_deferred 已经过期：")
+        for mid in stale:
+            print(f"    {mid}  这个模块的输出现在全部到得了，"
+                  f"请把正典里那行 ui_deferred 删掉")
+        print("  活儿干完了、借口没删。一条没人复核的豁免，"
+              "就是这道闸门开始不算数的地方。")
+        return 1
+    if real_partial:
+        print(f"\n✗ {len(real_partial)} 个 {args.release} 模块的界面只做了一半：")
+        for mid, title, missing in real_partial:
+            print(f"    {mid}  {title}  走不到：{', '.join(missing)}")
+        print("  要么补上入口，要么在正典里为它写一行 ui_deferred 说明为什么。"
+              "「以后再说」不写下来，就等于没有人记得。")
+        return 1
+    print(f"✓ 每个 {args.release} 模块的输出，界面上都到得了"
+          + (f"（{len(held)} 个由正典明文推迟）" if held else ""))
     return 0
 
 
