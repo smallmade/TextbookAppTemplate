@@ -67,6 +67,18 @@ def declared(text: str) -> dict[str, set[int]]:
         match = ENTRY.match(line)
         if not match:
             continue
+        # 是条目，还是一句顺带举例的正文？
+        #
+        # 说明文件的正文会写「…例如 a.py:158、b.py:163、c.py:9 …」，那种句子
+        # 以缩进加反引号开头，长得和条目一模一样，第一版把它当成了三条声明。
+        # 而**条目自己的说明文字里也会引到别的文件**（「与 solve/beam.py:47
+        # 同一个原因」），所以「一行只许提一处」这条判据一试就把真条目也杀了。
+        #
+        # 判据落在【有没有列表记号】上：条目是列表项或表格行，正文不是。
+        # 没有记号时（自检里的裸行写法）才退回「整行只提一处」。
+        marker = re.match(r"\s*(?:[-*+]\s|\|)", line)
+        if not marker and len(re.findall(r"[\w./\\-]+\.py:", line)) > 1:
+            continue
         path = match.group(1)
         if match.group(2):                       # 弧：登记它的**起点**
             lines = {int(match.group(2))}
@@ -224,6 +236,21 @@ def self_test() -> int:
     good = bool(truth) and len(truth) == 1
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  解析  全覆盖的文件不进未覆盖表")
+
+    prose = ("  这一段是正文，顺带举了三个例子："
+             "`kit/kernel/beam.py:120`、`kit/solve/root.py:7`、`kit/g.py:1`。\n")
+    good = not declared(prose)
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  忽略  没有列表记号、又提到多处的是正文"
+          + ("" if good else f"   ← {declared(prose)}"))
+
+    # 而条目的说明文字里引到别的文件，仍然是条目。第一版的判据在这里
+    # 把真条目也杀了，报出一条根本没人碰过的「少写」。
+    cross = "- `kit/kernel/beam.py:88` — 不可达：与 `kit/solve/root.py:7` 同一个原因\n"
+    good = declared(cross) == {"kit/kernel/beam.py": {88}}
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  保住  条目的说明里引到别的文件"
+          + ("" if good else f"   ← {declared(cross)}"))
 
     # 弧的写法：`L88→90` 登记起点 88，与 term-missing 的 `88->90` 对应。
     arc = ("kit/kernel/beam.py:L88→90 防御\n"

@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -188,7 +189,31 @@ def _pins_nonempty(func: ast.AST, iterable: str) -> bool:
         assert len(xs) > 0 / >= 1 / != 0 / == 3
         assert xs == <非空字面量>       等式钉死内容，顺带钉死非空
         assert y in xs                 成员关系蕴含非空
+
+    还要认一层【等价基底】：全称断言常常作用在 `xs.values()` 上，而旁边那条
+    非空断言钉的是 `xs` 本身。两者的空与非空是同一件事，把它们当成两个不同的
+    对象，会让闸门对一条已经写对了的测试报警——**而一道会乱叫的闸门两天之内
+    就会被关掉**，那比漏报更贵。
     """
+    for candidate in _equivalent_bases(iterable):
+        if _pins_nonempty_exact(func, candidate):
+            return True
+    return False
+
+
+def _equivalent_bases(iterable: str) -> list[str]:
+    """`xs.values()` / `xs.keys()` / `list(xs)` 与 `xs` 的空非空是同一件事。"""
+    bases = [iterable]
+    m = re.match(r"^(.+)\.(?:values|keys|items)\(\)$", iterable)
+    if m:
+        bases.append(m.group(1))
+    m = re.match(r"^(?:list|tuple|sorted|set|frozenset)\((.+)\)$", iterable)
+    if m and "," not in m.group(1):
+        bases.append(m.group(1))
+    return bases
+
+
+def _pins_nonempty_exact(func: ast.AST, iterable: str) -> bool:
     for node in ast.walk(func):
         if not isinstance(node, ast.Assert):
             continue
@@ -435,6 +460,12 @@ SELF_TEST = [
     ("对可能为空的推导式做全称断言",
      "def test_a():\n    rows = load()\n"
      "    assert all(r > 0 for r in rows)\n", "tautologies"),
+    ("非空断言钉在 xs 上，而全称断言作用在 xs.values() 上——同一件事",
+     "def test_x():\n"
+     "    xs = {'a': 1}\n"
+     "    assert len(xs) == len(('a',)) >= 1\n"
+     "    assert all(v > 0 for v in xs.values())\n",
+     None),
     ("同上，但先断言了集合非空",
      "def test_a():\n    rows = load()\n    assert len(rows) > 0\n"
      "    assert all(r > 0 for r in rows)\n", None),
