@@ -79,6 +79,8 @@ KEYS: dict[str, str] = {
     "appiconset": "Assets.xcassets 里的 AppIcon.appiconset 目录（check_icon.py 用）",
     "devices": "设备矩阵的设备清单，每项 {name, width, height}",
     "appearances": "设备矩阵的外观清单（light / dark）",
+    "citation_refs_dir": "参考书 PDF 所在目录（仓库外），check_citations.py 用",
+    "citation_books": "`source` 关键词 → 参考书 PDF 的 glob，如 durka = \"*Durka*.pdf\"；check_citations.py 用",
 }
 
 #: 自动探测 Python 包时依次试的父目录。顺序有意义：项目自己声明的形状

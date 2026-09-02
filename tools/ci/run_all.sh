@@ -266,6 +266,55 @@ else
     skip "出货副本" "Gate 01/06" "没有正典"
 fi
 
+# ══════════════════════════════════════════════════════════════
+# 元闸门要求 tools/ci 里每一道 check_* 都被【本项目的】runner 调用。
+# 下面这八道以前只有 run_all_local.sh（MechanicsOne 形状）在跑，通用 runner
+# 一道都没提——于是用通用 runner 的项目里，它们既没执行、也没出现在日志里。
+# 一道没人调用的闸门与一道通过了的闸门，在日志里长得一模一样。
+#
+# 路径一律走 ci.toml。写死任何一款的目录形状，是这些脚本分叉成两份的成因。
+# ══════════════════════════════════════════════════════════════
+
+CI_ENTITLEMENTS="${CI_ENTITLEMENTS:-}"
+CI_TESTS_DIR="${CI_TESTS_DIR:-}"
+
+run "正典 function 指针" "Gate 01" python3 "$CI/check_canon_functions.py" \
+    "$SPEC" --root "$P"
+
+run "理论手册散文源" "Gate 07" python3 "$CI/check_theory.py" --root "$P"
+
+run "施工书台账" "Gate 00" python3 "$CI/check_plan.py" --root "$P"
+
+run "层 3 符号证明真的被执行" "Gate 02" python3 "$CI/check_layer3_symbolic.py" \
+    --root "$P"
+
+run "第二源声明与层 5 fixture 对得上" "Gate 02" \
+    python3 "$CI/check_second_source.py" --root "$P"
+
+APPDIR="$(abs "$CI_SWIFT_APP_DIR")"
+KITDIR="$(abs "$CI_SWIFT_KIT_DIR")"
+if [ -n "$CI_SWIFT_APP_DIR" ] && [ -d "$APPDIR" ]; then
+    run "不变量 4 · 出货源码不依赖包外输入" "不变量4" \
+        bash "$CI/check_app_purity.sh" "$APPDIR" ${KITDIR:+"$KITDIR"}
+else
+    missing "出货源码纯度" "不变量4" "ci.toml 没有声明 swift_app_dir，或它不存在"
+fi
+
+ENT="$(abs "$CI_ENTITLEMENTS")"
+if [ -n "$CI_ENTITLEMENTS" ] && [ -f "$ENT" ] && [ -d "$APPDIR" ]; then
+    run "entitlements 与代码里在用的 API 对得上" "Gate 08" \
+        python3 "$CI/check_entitlements.py" "$ENT" "$APPDIR"
+else
+    skip "entitlements 一致性" "Gate 08" \
+         "尚不适用：ci.toml 没有声明 entitlements（阶段 08 之前正常）"
+fi
+
+if [ -n "$CI_SLUG" ]; then
+    run "站点五个 URL 实测回 200" "Gate 07" bash "$CI/check_urls.sh" "$CI_SLUG"
+else
+    missing "站点 URL 实测" "Gate 07" "ci.toml 没有声明 slug"
+fi
+
 run "许可审计" "Gate 09" python3 "$CI/audit_licences.py" "$P/dist"
 
 echo

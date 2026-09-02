@@ -67,8 +67,12 @@ step "G-02 · 界面走查覆盖全部画面" python3 tools/ci/check_interface_r
 
 step "闸门接线自检" python3 tools/ci/check_gates_are_wired.py --self-test
 step "每一道闸门都真的被调用" python3 tools/ci/check_gates_are_wired.py --root .
+# `--mine` 指出哪一格是【本项目】的：只有自己那一格算失败，别人的算情报。
+# 这里曾经写死 "Material Mechanics Calculator"，而本脚本是共用的：热力学那一款
+# 跑起来时，报的是 MechanicsOne 那一格的状态，自己那一格根本没查。它不会红，
+# 只会**答错**——这比红灯更难发现。项目名由脚本开头 `cd` 到的目录自己说。
 step "工具链单一真身（tools/ci 仍是模板的符号链接）" \
-     bash tools/ci/check_no_drift.sh .. --mine "Material Mechanics Calculator"
+     bash tools/ci/check_no_drift.sh .. --mine "$(basename "$PWD")"
 
 step "Gate 01 · 开发正典" python3 tools/ci/check_spec.py spec/specification.json
 step "Gate 01 · 剥离出货副本" python3 tools/ci/strip_spec.py spec/specification.json build/specification.shipped.json
@@ -229,6 +233,10 @@ gate "Gate 07 · 两册手册在包里且 App 打得开" \
 gate "自检 · 手册覆盖" python3 tools/ci/check_manual_coverage.py --self-test
 gate "Gate 07 · 理论手册每模块一节 / 使用手册每画面一节" \
      python3 tools/ci/check_manual_coverage.py --root .
+
+gate "自检 · 理论手册散文源" python3 tools/ci/check_theory.py --self-test
+gate "Gate 07 · 理论手册散文源完整、有实质、且经对抗复核" \
+     python3 tools/ci/check_theory.py --root .
 
 gate "自检 · 手册与站点零标识" python3 tools/ci/check_manual_isolation.py --self-test
 gate "Gate 07 · 两册与站点全文零教材标识" \

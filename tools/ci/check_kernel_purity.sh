@@ -165,6 +165,15 @@ echo
 echo "CHECKED n=$SEEN_TOTAL unit=个 .py  —— 本次检查了 $SEEN_TOTAL 个 .py（kernel $SEEN_KERNEL · 四层 $SEEN_LAYERS · ui $SEEN_UI）"
 if [ "$SEEN_TOTAL" -eq 0 ]; then
     echo "  ${RED}✗${OFF} 五层目录一个 .py 都没有——报「干净」等于报「没检查」"
+    # 最常见的成因，点名说出来，省掉一轮排查：`pip install -e` 会在 src/ 下
+    # 生成 src/<name>.egg-info/，与真正的包目录做兄弟。runner 若按「src/ 下
+    # 第一个目录」挑 $PKG，就会把 egg-info 喂进来——它没有 kernel/、
+    # composition/、ui/，于是每一段 grep 都是零命中，闸门在没看过任何一行
+    # 代码的情况下判「零依赖纪律通过」。GitHub Actions 上真的发生过一次。
+    echo "      喂进来的是 $PKG"
+    echo "      八成是 egg-info 混进了包目录的探测结果（\`pip install -e\` 的产物，"
+    echo "      它没有 __init__.py；真正的包一定有）。ci.toml 的"
+    echo "      python_package_dir 直接点名包目录可以根除这一类。"
     FAIL=$((FAIL+1))
 fi
 echo
