@@ -26,13 +26,46 @@ agrees_with_reference`）恰恰是对的设计——两份拷贝会漂——于�
 所以它现在解析 `from <同目录模块> import ...`，把那个模块里自带断言的函数
 名也算进来。只跟同目录、只跟一层：再远就是被测代码本身了。
 `--self-test` 交给它已知不合格的样本，两个方向都查。
+
+──────────────────────────────────────────────────────────────
+[M-03] 两处新增。
+
+**一、它数到 0 的时候必须变红。**
+
+它接受一个位置参数（测试目录）。有人按别的闸门的习惯写了 `--root .`，
+于是它去 `Path("--root").glob("test_*.py")` 里找，找到零个文件，打印
+「✓ 0 个测试函数，全部在文件里、有内容、有断言」，退出 0。**在 2246 个
+测试面前。** 这就是规范点名的最坏形态：查了零个对象，然后报通过。
+
+现在两件事一起改：认 `--root`（从 ci.toml 读 tests_dir），以及
+**N == 0 一律未通过**。
+
+**二、「有断言」不等于「断言能失败」。**
+
+上一版只问「有没有断言」。一个 `assert x or True` 有断言，永远绿，
+什么也没验证。实测样本：MechanicsOne 的 `test_boundaries.py` 里
+`assert (... ) or True` —— 加上 `or True` 之后整条断言恒真。
+
+四类恒真断言，逐条报出文件:行：
+  * `assert True` / `assert 1` / `assert "x"` —— 常数真值；
+  * `assert <任何东西> or True` —— 短路到真；
+  * `assert not False` 之类的常数取反；
+  * **对可能为空的推导式做全称断言** —— `assert all(f(x) for x in xs)` 与
+    `assert not any(...)` 在 `xs` 为空时恒真。这一类不判死：只有当这个测试
+    **没有**任何一处断言那个集合非空（`assert xs`、`len(xs) > 0`、
+    `assert xs, "..."`）时才报。空集合上的全称命题为真，是数理逻辑，
+    不是缺陷——缺陷是没有人检查那个集合是不是空的。
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import checked, load as load_config          # noqa: E402
 
 
 def _asserting_helpers(tree: ast.Module) -> set[str]:
@@ -117,14 +150,134 @@ def _calls(test: ast.AST, registries: dict[str, set[str]]) -> set[str]:
     return found
 
 
-def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else "python/tests")
+#: 恒真的常数。`assert 0.0` 会失败，所以不能一律看 truthiness——
+#: 只有真值为真的常数才是恒真断言。
+def _always_true_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and bool(node.value)
+
+
+def _tautological(test_node: ast.AST) -> str | None:
+    """这条断言表达式恒真吗？返回一句说明，或 None。"""
+    if _always_true_constant(test_node):
+        return f"assert {ast.unparse(test_node)} —— 常数真值，永远不会失败"
+    if isinstance(test_node, ast.BoolOp) and isinstance(test_node.op, ast.Or):
+        for value in test_node.values:
+            if _always_true_constant(value):
+                return ("短路到 `or " + ast.unparse(value)
+                        + "` —— 整条断言恒真，左边算什么都不影响")
+    if (isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not)
+            and isinstance(test_node.operand, ast.Constant)
+            and not test_node.operand.value):
+        return f"assert {ast.unparse(test_node)} —— 常数取反，永远不会失败"
+    return None
+
+
+#: 全称量词。对空集合恒真。
+UNIVERSAL = {"all"}
+EXISTENTIAL = {"any"}
+
+
+def _pins_nonempty(func: ast.AST, iterable: str) -> bool:
+    """这个函数里有没有一条断言，能保证 `iterable` 不是空的？
+
+    判据要具体到**同一个可迭代对象**，不能只问「这个测试里有没有出现过
+    len(...)」——那样任何一条无关的长度断言都会替一条真正的空集漏洞背书。
+    算数的四种写法：
+
+        assert xs                      裸真值
+        assert len(xs) > 0 / >= 1 / != 0 / == 3
+        assert xs == <非空字面量>       等式钉死内容，顺带钉死非空
+        assert y in xs                 成员关系蕴含非空
+    """
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assert):
+            continue
+        expr = node.test
+        if isinstance(expr, ast.Name) and expr.id == iterable:
+            return True
+        if not isinstance(expr, ast.Compare):
+            continue
+        left, right = ast.unparse(expr.left), [ast.unparse(c)
+                                               for c in expr.comparators]
+        # len(xs) <op> n
+        if left == f"len({iterable})":
+            for op, comparator in zip(expr.ops, expr.comparators):
+                if isinstance(op, (ast.Gt, ast.GtE, ast.NotEq)):
+                    return True
+                if isinstance(op, ast.Eq) and isinstance(comparator, ast.Constant) \
+                        and isinstance(comparator.value, int) and comparator.value > 0:
+                    return True
+        # xs == <非空字面量>
+        if left == iterable:
+            for op, comparator in zip(expr.ops, expr.comparators):
+                if isinstance(op, (ast.Eq, ast.NotEq)) \
+                        and isinstance(comparator, ast.Constant) \
+                        and comparator.value not in ("", None) \
+                        and bool(comparator.value):
+                    return True
+        # y in xs
+        for op, comparator in zip(expr.ops, expr.comparators):
+            if isinstance(op, ast.In) and ast.unparse(comparator) == iterable:
+                return True
+        if iterable in right and any(isinstance(op, (ast.Eq, ast.NotEq))
+                                     for op in expr.ops):
+            # <非空字面量> == xs，写反了的那一半
+            if isinstance(expr.left, ast.Constant) and bool(expr.left.value):
+                return True
+    return False
+
+
+def _vacuous_universals(func: ast.AST) -> list[str]:
+    """全称断言作用在推导式上，而这个函数没有断言过那个集合非空。
+
+    `assert all(f(x) for x in xs)` 与 `assert not any(...)` 在 xs 为空时
+    恒真。空集合上的全称命题为真是数理逻辑，不是缺陷；缺陷是**没有人检查
+    那个集合是不是空的**——`xs` 因为一个 bug 返回了空，这条测试照样绿。
+
+    修法通常只有一行：在旁边加一句 `assert len(xs) == 3`。
+    """
+    found: list[str] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assert):
+            continue
+        expr = node.test
+        negated = False
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+            expr, negated = expr.operand, True
+        if not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)):
+            continue
+        name = expr.func.id
+        if name not in (UNIVERSAL | EXISTENTIAL):
+            continue
+        if name in EXISTENTIAL and not negated:
+            continue            # `assert any(...)` on an empty set FAILS. Fine.
+        if not expr.args or not isinstance(
+                expr.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
+            continue
+        generators = expr.args[0].generators
+        if not generators:
+            continue
+        iterable = ast.unparse(generators[0].iter)
+        if _pins_nonempty(func, iterable):
+            continue
+        found.append(f"line {node.lineno}: assert "
+                     f"{'not ' if negated else ''}{name}(... for ... in "
+                     f"{iterable[:48]}) —— 集合为空时恒真，"
+                     f"而这个函数没有断言过它非空")
+    return found
+
+
+def scan(root: Path):
+    """返回 (统计, 各类问题清单)。抽出来是为了自检能直接调它。"""
     empty_files: list[str] = []
     empty_tests: list[str] = []
     assertionless: list[str] = []
+    tautologies: list[str] = []
     total = 0
+    files = 0
 
     for path in sorted(root.glob("test_*.py")):
+        files += 1
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError as error:
@@ -162,6 +315,35 @@ def main() -> int:
             if not has_check and not calls_pytest and not delegates:
                 assertionless.append(f"{path.name}::{test.name}")
 
+        # [M-03] 有断言 ≠ 断言能失败。
+        #
+        # 这一遍走**模块里的每一个函数**，不只是 test_*。理由与这道闸门
+        # 上一次被迫放宽时一样：这个仓库把断言托付给同模块的探针
+        # （`PROBES[boundary]()` 里那些 `m20_b3()`）。只看 test_* 的话，
+        # 那个已知实例——`assert not any(...) or True`——就正好落在盲区里，
+        # 而它就是本条判据的来源样本。
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Assert):
+                    continue
+                why = _tautological(node.test)
+                if why:
+                    tautologies.append(
+                        f"{path.name}:{node.lineno}::{func.name}  {why}")
+            for line in _vacuous_universals(func):
+                tautologies.append(f"{path.name}::{func.name}  {line}")
+
+    # 同一条 assert 可能被两个嵌套的函数各数一次，去重后再报。
+    tautologies = sorted(set(tautologies))
+    return (files, total), (empty_files, empty_tests, assertionless, tautologies)
+
+
+def report(root: Path) -> int:
+    (files, total), (empty_files, empty_tests, assertionless,
+                     tautologies) = scan(root)
+
     failed = False
     if empty_files:
         print(f"✗ {len(empty_files)} 个 test_*.py 里一个测试都没有：")
@@ -180,12 +362,50 @@ def main() -> int:
             print(f"    {name}")
         print("  跑得过不等于验证了什么。")
         failed = True
+    if tautologies:
+        print(f"✗ {len(tautologies)} 处断言【不可能失败】：")
+        for line in tautologies:
+            print(f"    {line}")
+        print("  一条恒真的断言与一条被删掉的断言，在日志里长得一模一样，"
+              "而前者还占着一行覆盖率。")
+        failed = True
 
+    print(checked(total, "个测试函数", f"{files} 个 test_*.py"))
+    if total == 0:
+        print("✗ 一个测试函数都没数到——这不是「全部合格」，这是没检查。")
+        print("  路径给对了吗？位置参数是测试目录；--root 指项目根，"
+              "由 ci.toml 的 tests_dir 决定看哪儿。")
+        return 1
     if failed:
         return 1
-    print(f"✓ {total} 个测试函数，全部在文件里、有内容、有断言"
+    print(f"✓ {total} 个测试函数，全部在文件里、有内容、有能失败的断言"
           f"（含托付给同模块辅助函数的）")
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("tests", nargs="?", type=Path, default=None,
+                    help="测试目录；不给就从 ci.toml 的 tests_dir 读")
+    ap.add_argument("--root", type=Path, default=None,
+                    help="项目根，用来找 ci.toml")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+
+    if args.self_test:
+        print("check_test_files.py 自检")
+        return self_test()
+
+    root = args.tests
+    if root is None:
+        project = args.root or Path(".")
+        cfg = load_config(project)
+        root = cfg.path("tests_dir") or (project / "python" / "tests")
+    if not root.is_dir():
+        print(f"尚不适用：还没有测试目录 {root}（阶段 02 之前正常）",
+              file=sys.stderr)
+        return 2
+    return report(root)
 
 
 #: 已知不合格的样本，每一个都必须被抓到；外加两个必须【不】被抓到的，
@@ -205,6 +425,31 @@ SELF_TEST = [
      "def test_a(k='x'):\n    PROBES[k]()\n", None),
     ("pytest.raises", "import pytest\n\ndef test_a():\n"
      "    with pytest.raises(ValueError):\n        int('x')\n", None),
+    # [M-03] 恒真断言。头一条照抄 MechanicsOne 的实例
+    # （python/tests/test_boundaries.py 里 `... or True` 那一条）。
+    ("`or True` 结尾的断言",
+     "def test_a():\n    x = 1\n    assert (x == 2) or True\n", "tautologies"),
+    ("assert True", "def test_a():\n    assert True\n", "tautologies"),
+    ("assert 1", "def test_a():\n    assert 1\n", "tautologies"),
+    ("assert not False", "def test_a():\n    assert not False\n", "tautologies"),
+    ("对可能为空的推导式做全称断言",
+     "def test_a():\n    rows = load()\n"
+     "    assert all(r > 0 for r in rows)\n", "tautologies"),
+    ("同上，但先断言了集合非空",
+     "def test_a():\n    rows = load()\n    assert len(rows) > 0\n"
+     "    assert all(r > 0 for r in rows)\n", None),
+    ("同上，非空由等式钉住（内容断言顺带钉死长度）",
+     "def test_a():\n    text = render()\n    assert text == 'abc'\n"
+     "    assert all(c.islower() for c in text)\n", None),
+    ("同上，非空由无关集合的长度断言「背书」——不算数",
+     "def test_a():\n    rows = load()\n    other = load2()\n"
+     "    assert len(other) > 0\n"
+     "    assert all(r > 0 for r in rows)\n", "tautologies"),
+    ("`assert any(...)` —— 空集合上会失败，不是恒真",
+     "def test_a():\n    rows = load()\n"
+     "    assert any(r > 0 for r in rows)\n", None),
+    ("assert 0 —— 常数，但会失败，不算恒真",
+     "def test_a():\n    assert 0 == 0\n", None),
 ]
 
 #: 同目录导入的样本：一个 support 模块 + 一个用它的测试。
@@ -258,12 +503,25 @@ def self_test() -> int:
         verdict = "拒绝" if should_reject else "放行"
         print(f"  {'PASS' if good else 'FAIL'}  {verdict}  {label}")
 
+    # [M-03] 零对象。这是它上一次静默放行的确切形状：`--root .` 被当成
+    # 位置参数，`Path("--root").glob(...)` 找到零个文件，报「✓ 0 个测试
+    # 函数」并退出 0——在 2246 个测试面前。
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "not_a_test.py").write_text("x = 1\n", encoding="utf-8")
+        argv, sys.argv = sys.argv, ["check_test_files.py", tmp]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main()
+        finally:
+            sys.argv = argv
+    good = code == 1
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  拒绝  一个测试函数都没数到"
+          f"（0 个对象 ≠ 通过）")
+
     print("\n自检通过——闸门既不漏报也不乱叫" if ok else "\n自检失败")
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
-        print("check_test_files.py 自检")
-        sys.exit(self_test())
     sys.exit(main())

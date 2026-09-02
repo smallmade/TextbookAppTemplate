@@ -118,14 +118,85 @@ def walk(node, path="$"):
 
 
 def shippable_keys(dev: dict) -> list[str]:
-    """Source keys the canon says may be named in the shipped product.
+    """Names by which a shippable source may be called in the shipped canon.
 
     Public-domain government reports are on the permitted list in the
     legal-isolation rules; copyrighted textbooks are not. The canon already
     records which is which, so this is read rather than restated.
+
+    [M-03] The list is no longer just `sources[].key`. Prose written by humans
+    calls these documents by their human names -- "AFFDL Sec. 3", "NASA Sec.
+    A3", "MIL-HDBK-5J Table B4" -- not by the canon's internal key
+    `affdl-sam`. Keys alone produced 28 hits on one project's
+    `verification_note` fields, every one of them a legitimate citation into a
+    public-domain government report, which is the exact false-positive class
+    this file's docstring already records having fired 23 times before.
+
+    So distinctive tokens from `key`, `edition`, `title` and `author` count
+    too, filtered two ways so the exemption cannot swallow the rule:
+
+      * >= 4 characters, so "US" and "of" do not match everything;
+      * not an ordinary word of this subject -- STOPWORDS below. Without that
+        filter, `title` = "Stress Analysis Manual" would make the word
+        "stress" a licence to cite any chapter of any book.
     """
-    return [src["key"] for src in dev.get("sources", [])
-            if src.get("ship") is True or src.get("licence") == "public-domain"]
+    return sorted(set(_shippable_names(dev)))
+
+
+#: Words that appear in public-domain report titles but are also the everyday
+#: vocabulary of these subjects. Naming one of these is not naming the report.
+STOPWORDS = {
+    "stress", "analysis", "manual", "structures", "structural", "materials",
+    "mechanics", "metallic", "elements", "aerospace", "vehicle", "volumes",
+    "flight", "dynamics", "laboratory", "force", "department", "defense",
+    "center", "space", "george", "marshall", "astronautic", "elastic",
+}
+
+
+def _shippable_names(dev: dict):
+    for src in dev.get("sources", []):
+        if not (src.get("ship") is True
+                or src.get("licence") == "public-domain"):
+            continue
+        key = src.get("key")
+        if key:
+            yield key
+        for field in ("edition", "title", "author"):
+            value = src.get(field) or ""
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", value):
+                if token.lower() not in STOPWORDS:
+                    yield token
+                # Hyphenated report numbers are cited by their prefix as often
+                # as in full: the canon says `AFFDL-TR-69-42`, the note says
+                # "AFFDL Sec. 3". Split and keep the alphabetic parts that are
+                # long enough to be distinctive (AFFDL, HDBK), which is where
+                # five of the remaining hits came from.
+                for part in re.findall(r"[A-Za-z]{4,}", token):
+                    if part.lower() not in STOPWORDS:
+                        yield part
+
+
+def surviving_copyrighted(ship: dict) -> list[tuple[str, str]]:
+    """Copyrighted / non-shippable source records still present in the ship copy.
+
+    [M-F1] Two independent grounds, either one enough:
+
+    * ``licence == "copyrighted"`` -- stated outright;
+    * ``ship`` is not ``True`` -- the canon declined to clear it, and a record
+      nobody cleared is a record that should not be there.
+
+    The two are checked separately rather than as one condition because they
+    have drifted before: a source can carry ``ship: false`` and no ``licence``
+    at all, and vice versa. Either alone is a failure.
+    """
+    out: list[tuple[str, str]] = []
+    for source in ship.get("sources", []):
+        key = source.get("key", "?")
+        if source.get("licence") == "copyrighted":
+            out.append((key, 'licence == "copyrighted"'))
+        elif source.get("ship") is not True:
+            out.append((key, "ship is not true -- nobody cleared it to ship"))
+    return out
 
 
 def cites_only_shippable(text: str, keys: list[str]) -> bool:
@@ -202,6 +273,19 @@ def main() -> int:
             # ...but the same pattern with no shippable source named must still
             # fire, or the exemption has swallowed the rule.
             bad["d"] = "as set out in Ch. 7 of the course text"
+            bad["e"] = "see Sec. 4.2 for the derivation"
+            # [M-03] The human name, not the canon key: prose says "AFFDL
+            # Sec. 3", never "affdl-sam Sec. 3". Five real hits came from
+            # exactly this, and every one was a citation into a public-domain
+            # government report.
+            for src in dev.get("sources", []):
+                if src.get("licence") != "public-domain":
+                    continue
+                edition = (src.get("edition") or "")
+                head = re.findall(r"[A-Za-z]{4,}", edition)
+                if head:
+                    good["h"] = f"{head[0]} Sec. 3 'Bar Analysis' (PDF p.239)"
+                    break
         fired = scan(bad, terms, shippable)
         quiet = scan(good, terms, shippable)
         if len(fired) < 3:
@@ -217,8 +301,33 @@ def main() -> int:
             print("A gate that cries wolf gets switched off. Narrow the terms.",
                   file=sys.stderr)
             return 2
+        # [M-F1] The record-level check needs its own known-bad sample: the
+        # exact shape that used to pass, i.e. author and title stripped but
+        # the record still present.
+        stripped_but_present = {"sources": [
+            {"key": "primary-a-solutions", "edition": "10th", "year": 2017,
+             "role": "adaptation-audit", "licence": "copyrighted",
+             "ship": False},
+            {"key": "nasa-asm", "author": "NASA", "title": "Structures Manual",
+             "licence": "public-domain", "ship": True},
+        ]}
+        survivors = surviving_copyrighted(stripped_but_present)
+        if len(survivors) != 1 or survivors[0][0] != "primary-a-solutions":
+            print("SELFTEST FAILED: a copyrighted source record with author "
+                  "and title already stripped was NOT caught. That exact "
+                  "shape is what shipped.", file=sys.stderr)
+            return 2
+        clean = {"sources": [{"key": "nasa-asm", "author": "NASA",
+                              "licence": "public-domain", "ship": True}]}
+        if surviving_copyrighted(clean):
+            print("SELFTEST FAILED: a public-domain source that the canon "
+                  "cleared to ship was flagged. Naming those is permitted and "
+                  "increases credibility.", file=sys.stderr)
+            return 2
         print(f"selftest passed: {len(fired)} hits on the known-bad sample, "
-              f"0 on legitimate physics vocabulary")
+              f"0 on legitimate physics vocabulary; the record-level check "
+              f"catches a stripped-but-present copyrighted source and lets a "
+              f"public-domain one through")
         return 0
 
     if args.ship is None or not args.ship.exists():
@@ -227,15 +336,40 @@ def main() -> int:
 
     ship = json.loads(args.ship.read_text(encoding="utf-8"))
     hits = scan(ship, terms, shippable_keys(dev))
+    survivors = surviving_copyrighted(ship)
+    n = sum(1 for _ in walk(ship))
+    print(f"CHECKED n={n} unit=strings  -- {n} strings scanned against "
+          f"{len(terms) + len(STRUCTURAL)} patterns")
+    if n == 0:
+        print("Gate 06 ship isolation FAILED: not one string was scanned. "
+              "Zero hits out of zero strings is not a clean bill of health.")
+        return 1
+    if survivors:
+        # [M-F1] A whole record, not a field. Stripping `author` and `title`
+        # left `{"edition": "10th", "year": 2017, "role":
+        # "adaptation-audit", "licence": "copyrighted"}` in the shipped canon:
+        # that edition-and-year pair identifies exactly one book in this
+        # subject, and the role additionally announces that its solutions
+        # manual was used. Field-name stripping cannot see this, because the
+        # thing that leaks is the record's EXISTENCE, and no field is named
+        # "existence". strip_spec.py now deletes such records outright; this
+        # is the independent second check that it did.
+        print(f"Gate 06 ship isolation FAILED: {len(survivors)} copyrighted "
+              f"source record(s) survived into the shipping canon")
+        for key, why in survivors:
+            print(f"  x sources[{key}]: {why}")
+        print("  A source record is an identifier even with author and title "
+              "removed -- edition + year names one book. Remove the record.")
+        return 1
     if hits:
         print(f"Gate 06 ship isolation FAILED: {len(hits)} identifier(s) "
               f"survived stripping")
         for h in hits:
             print(f"  x {h}")
         return 1
-    n = sum(1 for _ in walk(ship))
     print(f"Gate 06 ship isolation passed: {n} strings scanned, "
-          f"{len(terms) + len(STRUCTURAL)} patterns, 0 hits")
+          f"{len(terms) + len(STRUCTURAL)} patterns, 0 hits, "
+          f"0 copyrighted source records")
     return 0
 
 

@@ -22,24 +22,57 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import checked, load as load_config          # noqa: E402
 
 TOKEN = re.compile(r"\\[A-Za-z]+|\\.")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("canon", type=Path)
-    ap.add_argument("--python", type=Path, default=Path("python/src"))
+    # [M-03] `canon` was positional-required and the renderer was imported as
+    # the literal `mechanicskit.ui.latex`. tools/ci is one shared body shared by
+    # three apps: on the others this crashed or, worse, was written off in the
+    # runner as "not applicable, formulas render fine" -- a hand-written reason
+    # that the script, run by hand, contradicted with ten real hits.
+    ap.add_argument("canon", nargs="?", type=Path, default=None)
+    ap.add_argument("--root", type=Path, default=Path("."))
+    ap.add_argument("--python", type=Path, default=None)
+    ap.add_argument("--latex-module", default=None,
+                    help="渲染器模块，如 mechanicskit.ui.latex；"
+                         "不给就读 ci.toml 的 latex_module")
     args = ap.parse_args()
-    sys.path.insert(0, str(args.python.resolve()))
 
-    from mechanicskit.ui.latex import COMMANDS, STRUCTURAL, render
+    cfg = load_config(args.root)
+    canon_path = args.canon or cfg.path("canon")
+    if canon_path is None or not canon_path.is_file():
+        print("尚不适用：还没有正典（阶段 01 之前正常）", file=sys.stderr)
+        return 2
+    src = args.python or cfg.path("python_src_dir")
+    module_name = args.latex_module or cfg.get("latex_module")
+    if src is None or module_name is None:
+        print("尚不适用：ci.toml 没有声明 latex_module（或 python_src_dir）——"
+              "本项目的公式渲染器不在这道闸门认得的位置。", file=sys.stderr)
+        print("  声明了它这道闸门才有意义：它比对的是【本 App 正典里的公式】"
+              "和【本 App 渲染器的命令表】。", file=sys.stderr)
+        return 2
+    sys.path.insert(0, str(src.resolve()))
+    try:
+        latex = importlib.import_module(module_name)
+    except ImportError as error:
+        print(f"✗ 导入渲染器 {module_name} 失败：{error}")
+        print(f"  PYTHONPATH 里加的是 {src}")
+        return 1
+    COMMANDS, STRUCTURAL, render = (latex.COMMANDS, latex.STRUCTURAL,
+                                    latex.render)
 
-    canon = json.loads(args.canon.read_text(encoding="utf-8"))
+    canon = json.loads(canon_path.read_text(encoding="utf-8"))
     known = {command for command, _ in COMMANDS} | set(STRUCTURAL)
 
     unknown: dict[str, list[str]] = {}
@@ -73,12 +106,17 @@ def main() -> int:
             print(f"    {module_id}: {text}")
         failed = True
 
+    total = len(canon["modules"])
+    print(checked(total, "条 formula_display",
+                  f"渲染器 {module_name}"))
+    if total == 0:
+        print("✗ 正典里一个 module 都没有——这不是「全部可渲染」，这是没检查。")
+        return 1
     if failed:
-        print("\n  渲染器的表在 python/src/mechanicskit/ui/latex.py，"
+        print(f"\n  渲染器的表在 {module_name.replace('.', '/')}.py，"
               "Swift 侧在 Presentation/Latex.swift，两侧必须同时改。")
         return 1
 
-    total = len(canon["modules"])
     print(f"✓ 正典 {total} 条公式全部可渲染，无未知命令、无残留")
     return 0
 

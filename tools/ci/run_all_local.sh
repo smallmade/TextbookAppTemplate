@@ -21,6 +21,42 @@ step() {
     if "$@"; then echo "  ✓"; else echo "  ✗ 未通过"; FAIL=$((FAIL+1)); fi
 }
 
+# [M-03] 三态版的 step。
+#
+# `step` 只有两态，于是任何一道「本阶段尚不适用」的闸门在这里都是红的，
+# 而把它写成 `pending` 又等于永远不跑它。三态版按 run_all.sh 的同一套约定
+# 判：0 通过 / 1 未通过 / 2 尚不适用（**必须说出理由**）。
+#
+# 退出码 2 要过两道关，理由与 run_all.sh 里一字不差：argparse 的参数用法
+# 错误也是 exit 2，而它不是「本阶段不适用」。
+gate() {
+    echo
+    echo "── $1 ──"
+    shift
+    local out code n
+    out="$("$@" 2>&1)"; code=$?
+    n="$(echo "$out" | sed -nE 's/.*CHECKED n=([0-9]+).*/\1/p' | tail -1)"
+    echo "$out" | sed 's/^/  /'
+    case $code in
+        0) if [ "${n:-1}" = "0" ]; then
+               echo "  ✗ 未通过：报了通过，却一个对象都没检查"
+               FAIL=$((FAIL+1))
+           else
+               echo "  ✓${n:+  （$n 个对象）}"
+           fi ;;
+        2) if echo "$out" | grep -qE '(^|[^A-Za-z])(usage:|error:)|the following arguments are required'; then
+               echo "  ✗ 未通过：退出码 2 来自参数用法错误，不是「不适用」"
+               FAIL=$((FAIL+1))
+           elif echo "$out" | grep -qE '(尚)?不适用'; then
+               echo "  ⏸ 尚不适用（理由见上）"
+           else
+               echo "  ✗ 未通过：退出 2 却没有说「尚不适用」以及为什么"
+               FAIL=$((FAIL+1))
+           fi ;;
+        *) echo "  ✗ 未通过"; FAIL=$((FAIL+1)) ;;
+    esac
+}
+
 step "施工书闸门自检（必须能抓到八个已知不合格台账）" \
      python3 tools/ci/check_plan.py --self-test
 step "施工书台账（done 项的闸门必须存在且被调用）" \
@@ -166,6 +202,58 @@ step "Gate 07 · 站点自洽（页面齐备 / 链接 / 隐私页与隐私清单
      python3 tools/ci/check_site.py site/ --slug mechanicsone
 pending "Gate 07 · 站点五个 URL 实测回 200 (check_urls.sh)" \
         "需要伞形站点已部署——本地只验得到链接自洽"
+
+# ══════════════════════════════════════════════════════════════
+# [M-03] 本轮新增的九道闸门，以及三道原本没被本项目 runner 调用的。
+#
+# 全部走 gate()（三态），因为其中好几道现在就该是「尚不适用」——设备矩阵
+# 还没开始、探针生成器还没写。把它们写成 pending 等于永远不跑；写成 step
+# 又会把一个诚实的「尚未开始」印成红灯。三态是唯一诚实的记法。
+# ══════════════════════════════════════════════════════════════
+gate "自检 · 分支可见" python3 tools/ci/check_branching_visible.py --self-test
+gate "Gate M1 · 每条 branching 都有可见控件" \
+     python3 tools/ci/check_branching_visible.py --root .
+
+gate "自检 · 界面字串" python3 tools/ci/check_ui_strings.py --self-test
+gate "Gate 06A · 会上屏的字面量零占位符" \
+     python3 tools/ci/check_ui_strings.py --root .
+
+gate "自检 · 原生对标" python3 tools/ci/check_native_parity.py --self-test
+gate "Gate 06A · 菜单 / 帮助 / 关于 / 设置 / 导出都有落点" \
+     python3 tools/ci/check_native_parity.py --root .
+
+gate "自检 · 手册进包" python3 tools/ci/check_help_bundled.py --self-test
+gate "Gate 07 · 两册手册在包里且 App 打得开" \
+     python3 tools/ci/check_help_bundled.py --root .
+
+gate "自检 · 手册覆盖" python3 tools/ci/check_manual_coverage.py --self-test
+gate "Gate 07 · 理论手册每模块一节 / 使用手册每画面一节" \
+     python3 tools/ci/check_manual_coverage.py --root .
+
+gate "自检 · 手册与站点零标识" python3 tools/ci/check_manual_isolation.py --self-test
+gate "Gate 07 · 两册与站点全文零教材标识" \
+     python3 tools/ci/check_manual_isolation.py --root .
+
+gate "自检 · 设备矩阵" python3 tools/ci/check_device_matrix.py --self-test
+gate "Gate 06B · 设备矩阵每格每屏截图齐全" \
+     python3 tools/ci/check_device_matrix.py --root .
+
+gate "自检 · 未覆盖分支说明" python3 tools/ci/check_coverage_gaps.py --self-test
+gate "Gate 03 · coverage-gaps.md 与实测逐条一致" \
+     python3 tools/ci/check_coverage_gaps.py --root .
+
+gate "自检 · App 图标" python3 tools/ci/check_icon.py --self-test
+gate "Gate M7 · 图标十档齐全且真在成品包里" \
+     python3 tools/ci/check_icon.py --root .
+
+# 这三道存在已久，而本项目的 runner 从没调用过它们——元闸门在旧判据下
+# 因为【姊妹项目的】runner 提到过它们而放行。
+gate "Gate 02 · 引用页码核对" python3 tools/ci/check_citations.py --root .
+gate "Gate 06 · 画面图形覆盖" python3 tools/ci/check_figures.py --root .
+gate "Gate 08 · 构建号台账" python3 tools/ci/check_ledger.py .
+gate "Gate 07 · 截图尺寸" python3 tools/ci/check_screenshots.py submission/screenshots
+pending "Gate 05 · 跨语言 conformance (check_conformance.sh)" \
+        "本 runner 直接跑 MechanicsKitVerify（见上），比包装脚本更严：7290 值逐个比对"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部通过。"; exit 0; fi

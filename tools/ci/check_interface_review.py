@@ -20,6 +20,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import checked, load as load_config          # noqa: E402
+
 
 def screen_titles(root_view: str) -> dict[str, str]:
     """``{screen id: title}``，从 RootView.swift 里的 ScreenSpec 声明抽出。"""
@@ -63,6 +66,10 @@ def self_test() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=".", type=Path)
+    ap.add_argument("--screens", type=Path, default=None,
+                    help="声明画面清单的 Swift 文件；不给就读 ci.toml 的 screens_source")
+    ap.add_argument("--review", type=Path, default=None,
+                    help="走查记录 Markdown；默认 docs/interface-review.md")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -71,12 +78,26 @@ def main() -> int:
         return self_test()
 
     root = args.root.resolve()
-    root_view_path = root / "swift/Sources/MechanicsOneApp/RootView.swift"
-    review_path = root / "docs/interface-review.md"
+    # [M-03] 这条路径原本写死成 `MechanicsOneApp/RootView.swift`。在
+    # StructureMechOne 上它报「尚不适用：RootView.swift 不存在」——而
+    # `swift/Sources/StructureMechOneApp/RootView.swift` 确确实实存在，
+    # 147 行。**理由本身是假的**，而 45 个画面的走查记录因此无人核对。
+    cfg = load_config(root)
+    root_view_path = args.screens or cfg.path("screens_source")
+    if root_view_path is None:
+        app_dir = cfg.path("swift_app_dir")
+        root_view_path = (app_dir / "RootView.swift") if app_dir else None
+    review_path = args.review or (root / "docs/interface-review.md")
 
-    if not root_view_path.is_file():
-        print("尚不适用：RootView.swift 不存在", file=sys.stderr)
-        return 2
+    if root_view_path is None or not root_view_path.is_file():
+        if not (root / "swift" / "Sources").is_dir():
+            print("尚不适用：Swift 界面还没建（阶段 06 之前正常）",
+                  file=sys.stderr)
+            return 2
+        print(f"✗ 摸不到声明画面清单的源文件：{root_view_path}")
+        print("  swift/Sources 是在的——路径不对，不是「尚未开始」。")
+        print("  在项目根的 ci.toml 里写 screens_source。")
+        return 1
     if not review_path.is_file():
         print("尚不适用：docs/interface-review.md 还没有——A-01 还没做",
               file=sys.stderr)
@@ -90,6 +111,7 @@ def main() -> int:
 
     review = review_path.read_text(encoding="utf-8")
     missing = missing_titles(review, titles)
+    print(checked(len(titles), "个画面", f"走查记录 {review_path.name}"))
     if missing:
         print(f"✗ {len(missing)} / {len(titles)} 个画面没有出现在走查记录里：")
         for line in missing:

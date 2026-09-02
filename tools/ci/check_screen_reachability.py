@@ -46,6 +46,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import checked, load as load_config          # noqa: E402
+
 COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.S)
 COMMENT_LINE = re.compile(r"//[^\n]*")
 
@@ -383,6 +386,10 @@ def main() -> int:
     ap.add_argument("--release", default="v1.0", choices=RELEASES,
                     help="检查到哪一档（含更早的档）；这一档里 partial 也失败")
     ap.add_argument("--write", action="store_true", help="刷新 posable 表")
+    ap.add_argument("--app", type=Path, default=None,
+                    help="Swift 界面层目录；不给就读 ci.toml 的 swift_app_dir")
+    ap.add_argument("--kit", type=Path, default=None,
+                    help="Swift 核心库目录；不给就读 ci.toml 的 swift_kit_dir")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -391,12 +398,26 @@ def main() -> int:
         return self_test()
 
     root = args.root.resolve()
-    app_dir = root / "swift" / "Sources" / "MechanicsOneApp"
-    kit_dir = root / "swift" / "Sources" / "MechanicsKit"
-    spec_path = root / "spec" / "specification.json"
-    if not (app_dir.is_dir() and kit_dir.is_dir() and spec_path.is_file()):
+    # [M-03] 这三条路径原本写死成 MechanicsOne 的目录名。tools/ci 是三款共用
+    # 的一份真身，所以在 StructureMechOne 上它找不到 `MechanicsOneApp/`，
+    # **自己报「尚不适用」退 2**，被 runner 印成一行黄色的跳过——而这道闸门
+    # 正是为抓「内核实现了但界面上到不了」而写的，那次审计在多解分支上找到
+    # 了 16 处同类问题。风险最高的一道，被自己的默认路径关掉了。
+    cfg = load_config(root)
+    app_dir = args.app or cfg.path("swift_app_dir")
+    kit_dir = args.kit or cfg.path("swift_kit_dir")
+    spec_path = cfg.path("canon") or (root / "spec" / "specification.json")
+    if not (root / "swift" / "Sources").is_dir() or not spec_path.is_file():
         print("尚不适用：Swift 侧或正典还不在 —— 阶段 05 之前正常", file=sys.stderr)
         return 2
+    if app_dir is None or kit_dir is None or not app_dir.is_dir() \
+            or not kit_dir.is_dir():
+        print("✗ 摸不到 Swift 界面层或核心库目录：")
+        print(f"    App  {app_dir}  {'有' if app_dir and app_dir.is_dir() else '不在'}")
+        print(f"    Kit  {kit_dir}  {'有' if kit_dir and kit_dir.is_dir() else '不在'}")
+        print("  swift/Sources 是在的——路径不对，不是「尚未开始」。")
+        print("  在项目根的 ci.toml 里写 swift_app_dir / swift_kit_dir。")
+        return 1
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     rows = classify(
@@ -423,6 +444,11 @@ def main() -> int:
     # and catch any deferral that has quietly gone stale.
     held, real_partial, stale = split_deferred(real_partial, full_ids, deferred)
 
+    print(checked(len(rows), f"个 {args.release} 模块"))
+    if not rows:
+        print(f"✗ {args.release} 一个模块都没数到——这不是「全部可达」，"
+              f"这是没检查。")
+        return 1
     print(f"{args.release} 模块 {len(rows)} 个 · 全部输出可达 "
           f"{len(rows) - len(none) - len(partial)} · 部分 {len(real_partial)}"
           + (f"（另 {len(partial) - len(real_partial)} 个模块的缺口已核实为"

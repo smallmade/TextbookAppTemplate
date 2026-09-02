@@ -19,6 +19,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import checked, load as load_config          # noqa: E402
+
 REQUIRED = ("index.html", "support.html", "privacy.html",
             "manual/index.html", "theory/index.html")
 
@@ -27,7 +30,10 @@ LINK = re.compile(r'href="([^"#]+)', re.I)
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("site", type=Path)
+    ap.add_argument("site", nargs="?", type=Path, default=None,
+                    help="站点目录；不给就从 ci.toml 的 site_dir 读")
+    ap.add_argument("--root", type=Path, default=Path("."),
+                    help="项目根，用来找 ci.toml")
     # [shared] No default. This used to default to "structuremechone" -- one
     # sibling project's own slug baked into the shared template -- so any
     # other app that forgot the flag got a clean, confident, wrong report:
@@ -35,13 +41,28 @@ def main() -> int:
     # StructureOne's site, not its own. Silent and plausible is worse than
     # loud and wrong; `required=True` is the fix, matching the usage example
     # in this file's own docstring.
-    ap.add_argument("--slug", required=True,
-                    help="this project's own site slug -- there is no "
-                        "sensible default across sibling projects")
-    ap.add_argument("--manifest", type=Path,
-                    default=Path("swift/App/PrivacyInfo.xcprivacy"))
+    #
+    # [M-03] Still no default, and no longer `required=True` either. argparse
+    # exits 2 on a missing required argument, and the shared runner's exit-code
+    # convention reads 2 as "not applicable at this stage" -- so a forgotten
+    # flag printed as a calm yellow skip whose reason column was argparse's own
+    # error text, on every app sharing this template. The slug now comes from
+    # the project's own ci.toml when the flag is absent, and its genuine
+    # absence is a failure (1), never a skip.
+    ap.add_argument("--slug", default=None,
+                    help="this project's own site slug; read from ci.toml when "
+                         "omitted -- there is no sensible cross-project default")
+    ap.add_argument("--manifest", type=Path, default=None)
     args = ap.parse_args()
-    slug = args.slug
+
+    cfg = load_config(args.root)
+    slug = args.slug or cfg.get("slug")
+    if not slug:
+        print("✗ 不知道本项目的 slug：--slug 没给，ci.toml 里也没写。",
+              file=sys.stderr)
+        print("  站点隔间名没有跨项目的默认值——猜一个会让末尾印出的五个 URL "
+              "指向别人的站点，而本地全绿。", file=sys.stderr)
+        return 1
 
     # Take either the site directory or a project root that contains one.
     #
@@ -50,8 +71,13 @@ def main() -> int:
     # was complete. A gate that depends on being handed exactly the right path
     # is a gate that will one day be handed the wrong one, and this one was.
     site = args.site
+    if site is None:
+        site = cfg.path("site_dir") or (args.root / "site")
     if not (site / "index.html").exists() and (site / "site" / "index.html").exists():
         site = site / "site"
+    if not site.is_dir():
+        print(f"尚不适用：还没有站点目录 {site}（阶段 07 之前正常）", file=sys.stderr)
+        return 2
     print(f"  查的是 {site}")
     base = f"https://smallmade.github.io/{slug}"
     failed = False
@@ -65,8 +91,11 @@ def main() -> int:
 
     # 站内链接必须指向真实文件。
     broken: list[tuple[str, str]] = []
-    for page in sorted(site.rglob("*.html")):
+    pages = sorted(site.rglob("*.html"))
+    links = 0
+    for page in pages:
         for href in LINK.findall(page.read_text(encoding="utf-8")):
+            links += 1
             if href.startswith("mailto:"):
                 continue
             if href.startswith(base):
@@ -94,8 +123,9 @@ def main() -> int:
     # 隐私页与隐私清单必须说同一件事。
     privacy = (site / "privacy.html").read_text(encoding="utf-8") \
         if (site / "privacy.html").exists() else ""
-    if args.manifest.exists() and privacy:
-        data = plistlib.loads(args.manifest.read_bytes())
+    manifest = args.manifest or (args.root / "swift/App/PrivacyInfo.xcprivacy")
+    if manifest.exists() and privacy:
+        data = plistlib.loads(manifest.read_bytes())
         collects = bool(data.get("NSPrivacyCollectedDataTypes"))
         tracks = bool(data.get("NSPrivacyTracking"))
         claims_none = "collects no data" in privacy.lower()
@@ -110,6 +140,10 @@ def main() -> int:
         else:
             print("✓ 隐私页与隐私清单一致（均为：不收集、不追踪）")
 
+    print(checked(len(pages), "个页面", f"{links} 条站内链接"))
+    if not pages:
+        print("✗ 一个页面都没扫到——这不是「站点自洽」，这是没检查。")
+        return 1
     if failed:
         return 1
     print(f"\n  部署后仍须实测五个 URL 回 200：")

@@ -31,10 +31,17 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_config import checked, load as load_config          # noqa: E402
+
 GREEN, RED, BOLD, OFF = "\033[32m", "\033[31m", "\033[1m", "\033[0m"
 
-FIGURE = Path("swift/Sources/StructureMechOneApp/FigureColumn.swift")
-EVALUATE = Path("swift/Sources/StructureKit/Presentation/Evaluate.swift")
+# [M-03] 这两条路径原本写死成 StructureMechOne 的目录形状，而 tools/ci 是
+# 三款 App 共用的一份真身。在别的项目上它们找不到文件，于是这道闸门宣布
+# 「Swift 界面还没建」并退 2 —— 界面早就建好了。现在从项目自己的 ci.toml
+# 读；没声明就说出这句话本身，而不是替项目编一个理由。
+DEFAULT_FIGURE = "swift/Sources/StructureMechOneApp/FigureColumn.swift"
+DEFAULT_EVALUATE = "swift/Sources/StructureKit/Presentation/Evaluate.swift"
 
 
 def named_cases(source: str) -> set[str]:
@@ -75,6 +82,10 @@ def check(shipping: list[str], figure: str, evaluate: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", type=Path)
+    parser.add_argument("--figure", type=Path, default=None,
+                        help="图形派发的 Swift 源；不给就读 ci.toml 的 figure_source")
+    parser.add_argument("--evaluate", type=Path, default=None,
+                        help="按结构画图的登记表；不给就读 ci.toml 的 evaluate_source")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -82,15 +93,41 @@ def main() -> int:
         return self_test()
 
     root = args.root.resolve()
-    spec_path = root / "spec" / "specification.json"
+    cfg = load_config(root)
+    spec_path = cfg.path("canon") or (root / "spec" / "specification.json")
     if not spec_path.is_file():
         print(f"尚不适用：还没有 {spec_path.name}", file=sys.stderr)
         return 2
-    figure_path, evaluate_path = root / FIGURE, root / EVALUATE
+
+    figure_path = args.figure or cfg.path("figure_source")
+    evaluate_path = args.evaluate or cfg.path("evaluate_source")
+    if figure_path is None or evaluate_path is None:
+        if cfg.source is None:
+            figure_path = figure_path or (root / DEFAULT_FIGURE)
+            evaluate_path = evaluate_path or (root / DEFAULT_EVALUATE)
+        else:
+            print("尚不适用：ci.toml 没有声明 figure_source / evaluate_source。",
+                  file=sys.stderr)
+            print("  这道闸门认的是 `switch module.id` + `openingFamily` 那种"
+                  "集中派发的形状；一个画面一个 Drawing 视图的项目要另写一道。",
+                  file=sys.stderr)
+            return 2
     if not figure_path.is_file() or not evaluate_path.is_file():
-        print("尚不适用：Swift 界面还没建（找不到 FigureColumn.swift）",
-              file=sys.stderr)
-        return 2
+        if not (root / "swift" / "Sources").is_dir():
+            print("尚不适用：Swift 界面还没建（阶段 06 之前正常）",
+                  file=sys.stderr)
+            return 2
+        where = "ci.toml 指的" if cfg.source else "（本项目没有 ci.toml，用的是模板默认）"
+        print(f"✗ {where}图形源不在：")
+        for path in (figure_path, evaluate_path):
+            mark = "有" if path.is_file() else "不在"
+            print(f"    [{mark}] {path}")
+        print("  Swift 界面是建了的——路径不对，不是「尚未开始」。")
+        if not cfg.source:
+            print("  修法：在项目根写一份 ci.toml，声明 figure_source 与")
+            print("        evaluate_source；本项目的图形不是集中派发的形状时，")
+            print("        不声明它们，这道闸门会退 2 并说出那句理由。")
+        return 1
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     shipping = [m["id"] for m in spec["modules"]
@@ -123,6 +160,11 @@ def main() -> int:
               f"（具名 {drawn} · 按结构画 {shaped}）")
 
     print()
+    print(checked(len(shipping), "个出货画面"))
+    if not shipping:
+        print(f"  {RED}✗{OFF} 正典里一个 v1.x 模块都没有——"
+              f"这不是「图形覆盖通过」，这是没检查")
+        fail += 1
     if fail:
         print(f"{RED}{BOLD}未通过：{fail} 项。{OFF}\n")
         return 1

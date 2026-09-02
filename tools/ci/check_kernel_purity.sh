@@ -102,16 +102,36 @@ kernel_selftest() {
 selftest "$UI_PATTERN" || exit 2
 kernel_selftest || exit 2
 
+# 对象计数（架构不变量 6）。
+#
+# 这道闸门对**不存在的目录**判「干净」：`grep -r` 在没有 kernel/ 时什么也
+# 不输出，HITS 为空，于是打印 ✓。「没有东西可查」与「查过了是干净的」在
+# 日志里长得一模一样——这正是规范点名的三个实例之一。
+#
+# 所以先数一遍看过几个 .py。数到零就是未通过。
+count_py() { find "$1" -name "*.py" -type f 2>/dev/null | wc -l | tr -d ' '; }
+SEEN_KERNEL="$(count_py "$PKG/kernel")"
+SEEN_LAYERS=0
+for layer in kernel composition solve dimension; do
+    SEEN_LAYERS=$((SEEN_LAYERS + $(count_py "$PKG/$layer")))
+done
+SEEN_UI="$(count_py "$PKG/ui")"
+SEEN_TOTAL=$((SEEN_LAYERS + SEEN_UI))
+
 echo
 echo "${BOLD}架构不变量 1 · kernel 零依赖${OFF}"
+if [ "$SEEN_KERNEL" -eq 0 ]; then
+    echo "  ${RED}✗${OFF} $PKG/kernel 里一个 .py 都没有——这不是「干净」，这是没检查"
+    FAIL=$((FAIL+1))
+fi
 HITS="$(grep -rnE "${IMPORT}" "$PKG/kernel" --include="*.py" 2>/dev/null \
         | grep -vE "$ALLOWED" || true)"
 if [ -n "$HITS" ]; then
     echo "  ${RED}✗${OFF} kernel 引入了 math 与本包之外的东西："
     echo "$HITS" | sed 's/^/      /'
     FAIL=$((FAIL+1))
-else
-    echo "  ${GREEN}✓${OFF} 只出现 math 与本包自身"
+elif [ "$SEEN_KERNEL" -gt 0 ]; then
+    echo "  ${GREEN}✓${OFF} 只出现 math 与本包自身（$SEEN_KERNEL 个 .py）"
 fi
 
 echo
@@ -141,6 +161,12 @@ else
     echo "  ${GREEN}✓${OFF} ui 决策层不含 GUI 库"
 fi
 
+echo
+echo "CHECKED n=$SEEN_TOTAL unit=个 .py  —— 本次检查了 $SEEN_TOTAL 个 .py（kernel $SEEN_KERNEL · 四层 $SEEN_LAYERS · ui $SEEN_UI）"
+if [ "$SEEN_TOTAL" -eq 0 ]; then
+    echo "  ${RED}✗${OFF} 五层目录一个 .py 都没有——报「干净」等于报「没检查」"
+    FAIL=$((FAIL+1))
+fi
 echo
 [ "$FAIL" -eq 0 ] && { echo "${GREEN}${BOLD}零依赖纪律通过。${OFF}"; echo; exit 0; }
 echo "${RED}${BOLD}未通过：$FAIL 项。${OFF}"; echo; exit 1
