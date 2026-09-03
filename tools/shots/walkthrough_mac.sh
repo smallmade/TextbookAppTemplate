@@ -113,7 +113,7 @@ for i in $(seq 1 "$COUNT"); do
     # 按标题找行，不按序号算行：**分节标题也占一行**，两者只在恰好没有分节
     # 的 App 上重合。见 matrix_common.sh 的 matrix::select_screen。
     if ! matrix::select_screen "$PROC" "$ROWPATH" "$WANT_TITLE" "$N_ROWS"; then
-        echo "   ✗ 第 $i 屏（$SID）：扫到第 $N_ROWS 行也没出现标题「$WANT_TITLE」。" >&2
+        echo "   ✗ 第 $i 屏（${SID}）：扫到第 $N_ROWS 行也没出现标题「${WANT_TITLE}」。" >&2
         echo "     最后看到的是「${MATRIX_LAST_TITLE:-}」。辅助功能层级可能变了：" >&2
         echo "     osascript -e 'tell application \"System Events\" to tell process \"$PROC\" to get entire contents of window 1'" >&2
         FAILED=1

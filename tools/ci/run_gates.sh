@@ -88,7 +88,7 @@ must_fail() { CUR="$1"; local want="$2"; shift 2
     if [ "$code" -eq 0 ]; then
         _fail "已知不合格样本【通过了】—— 这道闸门抓不到它该抓的东西"
     elif ! grep -qF "$want" <<<"$out"; then
-        _fail "样本被拒了，但理由不是「$want」—— 红得不是地方"
+        _fail "样本被拒了，但理由不是「${want}」—— 红得不是地方"
         echo "$out" | grep -v '^[[:space:]]*$' | tail -3 | sed 's/^/      /'
     else
         echo "  ${GREEN}✓${OFF} 已知不合格样本被抓到：$want"; PASS=$((PASS+1))
@@ -313,7 +313,7 @@ if [ -f "$LISTING" ]; then
     gate "Gate 07 · 文案字数与命名规则" \
          python3 tools/ci/check_listing_limits.py "$LISTING"
 else
-    pending "Gate 07 · 文案字数" "还没有 $LISTING（阶段 07 之前正常）"
+    pending "Gate 07 · 文案字数" "还没有 ${LISTING}（阶段 07 之前正常）"
 fi
 
 if [ -d "$SHOTS" ]; then
@@ -323,7 +323,7 @@ if [ -d "$SHOTS" ]; then
     step "Gate 07 · 截图尺寸（ASC 实测值）" \
          python3 tools/ci/check_screenshots.py "$SHOTS"
 else
-    pending "Gate 07 · 截图尺寸" "还没有 $SHOTS（阶段 07 之前正常）"
+    pending "Gate 07 · 截图尺寸" "还没有 ${SHOTS}（阶段 07 之前正常）"
 fi
 
 # 站点 URL 要联网实测。没有 slug 就没有合理的默认值——猜一个会让这道闸门

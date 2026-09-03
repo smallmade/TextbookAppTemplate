@@ -162,7 +162,7 @@ for APPEARANCE in light dark; do
     echo
     echo "══ 外观：$APPEARANCE ══"
     WINDOW_ID="$(launch_app "$APPEARANCE")" || {
-        echo "✗ $APPEARANCE：App 起不来或拿不到窗口。它可能被 SIGKILL 了——" >&2
+        echo "✗ ${APPEARANCE}：App 起不来或拿不到窗口。它可能被 SIGKILL 了——" >&2
         echo "  看 Console 里的 CODESIGNING。" >&2
         FAILED=$((FAILED+1)); continue; }
 
@@ -202,7 +202,7 @@ for APPEARANCE in light dark; do
         REACHABLE=1
         if [ "$GOT_W" != "$WANT_W" ] || [ "$GOT_H" != "$WANT_H" ]; then
             REACHABLE=0
-            echo "   ⚠ $NAME：要 ${WANT_W}×${WANT_H}pt，窗口服务器给 ${GOT_W}×${GOT_H}pt"
+            echo "   ⚠ ${NAME}：要 ${WANT_W}×${WANT_H}pt，窗口服务器给 ${GOT_W}×${GOT_H}pt"
             echo "     —— 本机屏幕放不下。这一档不产出矩阵格，只在 _probe/ 留实测图。"
         else
             echo "   ▸ $NAME  ${GOT_W}×${GOT_H}pt"
@@ -223,12 +223,12 @@ for APPEARANCE in light dark; do
             TOTAL=$((TOTAL+1))
 
             if ! matrix::select_screen "$PROC" "$ROWPATH" "$WANT_TITLE" "$N_ROWS"; then
-                echo "   ✗ 第 $i 屏（$SID）：扫到第 $N_ROWS 行也没出现标题「$WANT_TITLE」。" >&2
+                echo "   ✗ 第 $i 屏（${SID}）：扫到第 $N_ROWS 行也没出现标题「${WANT_TITLE}」。" >&2
                 echo "     最后看到的是「${MATRIX_LAST_TITLE:-}」。辅助功能层级可能变了：" >&2
                 echo "     osascript -e 'tell application \"System Events\" to tell process \"$PROC\" to get entire contents of window 1'" >&2
                 matrix::record switch-failed "$NAME" "$SID" "$APPEARANCE" \
                     "$WANT_W" "$WANT_H" "$GOT_W" "$GOT_H" "" \
-                    "找不到标题「$WANT_TITLE」，停在「${MATRIX_LAST_TITLE:-}」"
+                    "找不到标题「${WANT_TITLE}」，停在「${MATRIX_LAST_TITLE:-}」"
                 exit 1
             fi
 
