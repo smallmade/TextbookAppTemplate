@@ -74,6 +74,43 @@ def in_bundle(resources: Path, name: str) -> bool:
     return (resources / f"{name}.html").is_file()
 
 
+def bundled_copies(resources: Path, name: str) -> list[Path]:
+    """这一册在包里的那几个文件。"""
+    if (resources / name).is_dir():
+        return sorted((resources / name).rglob("*.html"))
+    single = resources / f"{name}.html"
+    return [single] if single.is_file() else []
+
+
+def stale_against_source(resources: Path, site: Path, name: str) -> str | None:
+    """包里那一份与站点那一份**内容**一样吗？不一样就返回一句话说明。
+
+    此前这道闸门只问「在不在」。于是手册重写完、站点重建完，而 `dist/` 里
+    那两个包还带着上一次打包时的旧文本——**闸门是绿的，而 App 里的手册是过期
+    的**。实测差值：523 KB 对 557 KB。
+
+    「在不在」和「是不是当前那一份」是两个问题，而只问前一个的检查，会在
+    每一次「改了手册但没重新打包」时安静放行。这与本套件里另外两处同族：
+    比较两份都过期的产物、以及深浅色截图其实是同一张。
+    """
+    packaged = bundled_copies(resources, name)
+    if not packaged:
+        return None                     # 不在包里，由 in_bundle 那一条去报
+    source = site / name / "index.html"
+    if not source.is_file():
+        source = site / f"{name}.html"
+    if not source.is_file():
+        return None                     # 站点里没有源，无从比较
+    want = source.read_bytes()
+    for copy in packaged:
+        if copy.read_bytes() == want:
+            return None
+    sizes = " / ".join(f"{c.stat().st_size:,}" for c in packaged)
+    return (f"{name}：包里那一份与 site/ 的不是同一份内容"
+            f"（包 {sizes} 字节，站点 {len(want):,} 字节）"
+            f"——手册重建过而这个包没有重新打，App 里的是旧的")
+
+
 def source_opens(sources: str, names: list[str]) -> list[str]:
     """哪几册在源码里找不到打开它的代码路径。"""
     if not OPENS_RESOURCE.search(sources):
@@ -209,7 +246,16 @@ def main() -> int:
             print(f"    查的是 {resources}")
             failed = True
         else:
-            print(f"✓ {bundle.name} 的资源里两册齐备")
+            site = root / "site"
+            stale = [s for s in (stale_against_source(resources, site, n)
+                                 for n in names) if s]
+            if stale:
+                print(f"✗ {bundle.name} 的资源里两册都在，但不是当前那一份：")
+                for line in stale:
+                    print(f"    {line}")
+                failed = True
+            else:
+                print(f"✓ {bundle.name} 的资源里两册齐备，且与 site/ 逐字节相同")
 
     return 1 if failed else 0
 
