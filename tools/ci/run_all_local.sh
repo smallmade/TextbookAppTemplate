@@ -57,6 +57,83 @@ gate() {
     esac
 }
 
+# ══════════════════════════════════════════════════════════════
+# 项目形状：读 <项目根>/ci.toml，读不到就自动探测。
+#
+# 这个 runner 是【多款 App 共用的同一个文件】——tools/ci 是指向模板仓库的
+# 符号链接。它却把某一款 App 的目录形状写死在命令行上：python/src/mechanicskit、
+# swift/Sources/MechanicsOneApp、swift/App/MechanicsOne.entitlements、
+# --slug mechanicsone、python/tests……于是别的项目要用它，只能再抄一份。
+#
+# 抄一份的代价这份文件自己就记着——见上面 --mine 那一段：写死的项目名让
+# 姊妹项目报的是别人那一格，**不会红，只会答错**。而写死的【路径】更糟：
+# 闸门按别人的形状找不到东西，自己印一句「尚不适用」退 2，于是被印成一行
+# 黄色的跳过。一道按别人的目录形状宣布自己不适用的闸门，与一道通过了的
+# 闸门，在日志里长得一模一样。
+#
+# run_all.sh 与 run_gates.sh 已经先后走通这条路，这是最后一个还写死形状的
+# runner。形状由项目自己在 ci.toml 里声明，脚本读它。
+# ══════════════════════════════════════════════════════════════
+eval "$(python3 tools/ci/ci_config.py --root . --shell)"
+CI_CANON="${CI_CANON:-}"
+CI_SHIPPED_CANON="${CI_SHIPPED_CANON:-build/specification.shipped.json}"
+CI_PYTHON_PACKAGE_DIR="${CI_PYTHON_PACKAGE_DIR:-}"
+CI_PYTHON_SRC_DIR="${CI_PYTHON_SRC_DIR:-}"
+CI_TESTS_DIR="${CI_TESTS_DIR:-}"
+CI_SWIFT_APP_DIR="${CI_SWIFT_APP_DIR:-}"
+CI_SWIFT_KIT_DIR="${CI_SWIFT_KIT_DIR:-}"
+CI_ENTITLEMENTS="${CI_ENTITLEMENTS:-}"
+CI_SITE_DIR="${CI_SITE_DIR:-site}"
+CI_SLUG="${CI_SLUG:-}"
+
+# pytest 与输入矩阵是按【目录】跑的，而 ci.toml 只声明 tests_dir 一个键。
+# PYDIR 是它的父目录：pyproject.toml 的 [tool.pytest.ini_options] 与
+# [tool.coverage.run] 在那里，所以那几步必须先 cd 进去，不能改成从仓库根
+# 指着测试目录跑——那会换掉 pytest 的 rootdir，连带换掉覆盖率的配置来源。
+# TESTS 是测试目录相对 PYDIR 的名字。
+#   tests_dir="python/tests" → PYDIR="python"  TESTS="tests"
+#   tests_dir="tests"        → PYDIR="."       TESTS="tests"
+PYDIR="$(dirname "${CI_TESTS_DIR:-.}")"
+TESTS="$(basename "${CI_TESTS_DIR:-tests}")"
+
+# 一个值没声明、或它指的东西根本不在 —— 这不是跳过。
+# 「没有东西可查」与「查过了是干净的」必须分得开（架构不变量 6）。
+missing() {
+    printf "\n── %s ──\n  ✗ 未通过 —— %s\n" "$1" "$2"
+    FAIL=$((FAIL+1))
+}
+
+# need <名称> <ci.toml 的键…> -- <命令…>
+#
+# 键全都有值、且指的路径存在 → 照常交给 step；任一缺席 → missing（未通过）。
+# 报的是【键名】而不是路径，因为看日志的人接下来要做的事，是去 ci.toml 补
+# 那一行。键只收路径类的：slug 不是路径，它在下面单独判。
+#
+# 两处刻意的写法：
+#   · 不用数组。这台机器上 /bin/bash 是 3.2，空数组的 ${#a[@]} 在 set -u 下
+#     报 unbound variable，而这类差异只在别人的机器上现形——本仓库已经为
+#     「本机重现不了」的 shell 差异付过一次学费（$VERSION 紧跟全形逗号）。
+#   · 少写 `--` 时【大声失败】。漏了它的话 "$@" 会是空的，而 `if "$@"` 对空
+#     参数返回 0——一道什么都没跑的闸门报 ✓，正是这个文件通篇在防的事。
+need() {
+    local name="$1"; shift
+    local key var val gone="" saw=""
+    while [ $# -gt 0 ]; do
+        if [ "$1" = "--" ]; then saw=yes; shift; break; fi
+        key="$1"; shift
+        var="CI_$(echo "$key" | tr '[:lower:]' '[:upper:]')"
+        val="${!var:-}"
+        if [ -z "$val" ] || [ ! -e "$val" ]; then gone="$gone $key"; fi
+    done
+    if [ -z "$saw" ] || [ $# -eq 0 ]; then
+        missing "$name" "need 用法错：少了 -- 或它后面的命令（脚本自己的错，不是项目的）"
+    elif [ -n "$gone" ]; then
+        missing "$name" "ci.toml 缺这些键，或它们指的路径不在：${gone# }"
+    else
+        step "$name" "$@"
+    fi
+}
+
 step "施工书闸门自检（必须能抓到八个已知不合格台账）" \
      python3 tools/ci/check_plan.py --self-test
 step "施工书台账（done 项的闸门必须存在且被调用）" \
@@ -184,8 +261,16 @@ step "Gate 05+06 · Swift Release 零警告（含 App）" \
 step "Gate 05 · 参考值与扫描 fixture 是最新的" \
      bash -c "PYTHONPATH=python/src python3 tools/conformance/emit_reference.py --check >/dev/null && PYTHONPATH=python/src python3 tools/conformance/emit_sweep.py --check >/dev/null"
 
-step "Gate 05 · 跨语言 conformance · Swift ↔ Python" \
-     bash -c "swift run --package-path swift MechanicsKitVerify"
+# [M-A19] 这一步以前直接跑 MechanicsKitVerify，而把 check_conformance.sh
+# 挂在末尾的 pending 里，理由写的是「直接跑比包装脚本更严」。对 7980 个值
+# 那句话成立，对**正典指纹**不成立：直接跑那一步比的是 Swift 读到的活文件
+# 与 reference.json 里记下的 sha256，要再借 emit_reference.py --check 那一步
+# 接力才等价于「两侧此刻读的是同一批字节」。包装脚本自己就把两侧的活值各算
+# 一次当场比——而它那一步从写下来那天起就只会走到「Swift 侧没有报告正典
+# 指纹」，因为 main.swift 里压根没印过那行。印上了，于是这里改成跑包装脚本
+# 本身：**被文档写成闸门的那一个，就该是真的在跑的那一个。**
+gate "Gate 05 · 跨语言 conformance · Swift ↔ Python（含正典指纹）" \
+     bash tools/ci/check_conformance.sh .
 step "原型与共享模块同步" bash -c "python3 tools/conformance/build_prototype.py >/dev/null && git diff --quiet design/prototype.html 2>/dev/null || true"
 
 # [2026-09-01] check_site.py 曾经在没给 --slug 时默认落到另一个姊妹项目的
@@ -260,9 +345,6 @@ gate "Gate 02 · 引用页码核对" python3 tools/ci/check_citations.py --root 
 gate "Gate 06 · 画面图形覆盖" python3 tools/ci/check_figures.py --root .
 gate "Gate 08 · 构建号台账" python3 tools/ci/check_ledger.py .
 gate "Gate 07 · 截图尺寸" python3 tools/ci/check_screenshots.py submission/screenshots
-pending "Gate 05 · 跨语言 conformance (check_conformance.sh)" \
-        "本 runner 直接跑 MechanicsKitVerify（见上），比包装脚本更严：7290 值逐个比对"
-
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部通过。"; exit 0; fi
 echo "未通过：$FAIL 项。"; exit 1
