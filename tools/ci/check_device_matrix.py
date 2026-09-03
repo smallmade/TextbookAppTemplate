@@ -84,6 +84,84 @@ def cell_files(shots: list[Path], device: str, screen: str,
             if all(part in p.stem.lower() for part in want)]
 
 
+# ── 本机屏幕放不下的那些格 ────────────────────────────────────────────
+#
+# [M-A20] 有些档位是负责人点名的目标设备，而不是本机能做到的事：外接 2.5K
+# 那一档要 1300pt 高的窗口，本机两块屏的可用高都是 1080。这些格永远拍不到，
+# 于是这道闸门永远红——而一道永远红的闸门，两天之内就会被关掉。
+#
+# 但「拍不到」不能由采集工具自己说了算。**同一批数据里已经有过一次错判**：
+# matrix_mac.sh 把每个窗口都摆在 {0,0}（主屏原点，被菜单栏与程序坞吃掉
+# 90pt），于是要 1010pt 的 mac-pro-16 被钳到 990，36 格全登记成
+# 「本机屏幕放不下」。而第二块屏满 1080——那一档一直拍得到，只是没摆对屏。
+# 采集侧修好之后，同一台机器同一天拍满了 36 格。
+#
+# 所以豁免要两个条件同时成立，缺一不可：
+#
+#   1. 采集登记表里这一格确实是 unreachable，且记下了被钳到多少（有证据）；
+#   2. **这一档要的高度，超过本机最高那块屏的可用高**（硬件确实办不到）。
+#
+# 第 2 条是拿硬件复核第 1 条。它会拒绝 mac-pro-16 那种错判——1010 没有超过
+# 1080，所以无论登记表怎么写，那 36 格都必须真的去拍。
+#
+# 量不到屏幕（无头 CI、拿不到 AppKit）时**一格都不豁免**：不确定的时候
+# 报缺，而不是报通过。
+def machine_screen_height(root: Path) -> int | None:
+    """本机最高那块屏的可用高度（点）。量不到返回 None。"""
+    helper = root / "tools" / "shots" / "RoomiestScreen.swift"
+    if not helper.is_file():
+        return None
+    try:
+        out = subprocess.run(["swift", str(helper)],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    parts = out.stdout.strip().split("\t")
+    if len(parts) != 4:
+        return None
+    try:
+        return int(parts[3])
+    except ValueError:
+        return None
+
+
+def clamped_cells(shots_dir: Path) -> dict[tuple[str, str, str], str]:
+    """采集登记表里判过 unreachable 的格 → 它被钳到的实测尺寸。
+
+    只认最新那一份登记表里仍然是 unreachable 的格：某一档后来拍成了，
+    旧表里那一行就不该再替它挡着。
+    """
+    manifests = sorted(shots_dir.rglob("_manifest.tsv"))
+    if not manifests:
+        return {}
+    out: dict[tuple[str, str, str], str] = {}
+    for manifest in manifests:            # 旧的先读，新的覆盖旧的
+        try:
+            rows = manifest.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for row in rows:
+            cells = row.split("\t")
+            if len(cells) < 8 or cells[0] == "status":
+                continue
+            status, device, screen, appearance = cells[0], cells[1], cells[2], cells[3]
+            key = (device, screen, appearance)
+            if status != "unreachable":
+                out.pop(key, None)        # 后来拍成了，豁免作废
+                continue
+            want_h, got_h = cells[5], cells[7]
+            try:
+                if int(got_h) >= int(want_h):
+                    out.pop(key, None)    # 没被钳矮，不算拍不到
+                    continue
+            except ValueError:
+                continue
+            out[key] = f"要 {cells[4]}×{want_h}pt，窗口服务器给到 {cells[6]}×{got_h}pt"
+    return out
+
+
 def size_ok(measured: tuple[int, int], device: dict) -> tuple[bool, str]:
     """实测像素与设备声明的点数，必须差一个整数倍率。"""
     want_w, want_h = int(device["width"]), int(device["height"])
@@ -194,6 +272,45 @@ def self_test() -> int:
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  放行  @1x 的 Mac 窗口")
 
+    # [M-A20] 「本机屏幕装不下」这条豁免必须抓得住被滥用的样子。
+    #
+    # 已知会失败的样本正是这套数据自己出过的那次错判：采集侧把窗口摆在主屏
+    # 原点，1010pt 的档被菜单栏与程序坞挤到 990，于是登记成 unreachable。
+    # 那一档屏幕明明装得下——豁免必须拒绝它，逼人去重拍（后来重拍确实拍满了）。
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory() as tmp:
+        shots = Path(tmp)
+        (shots / "_manifest.tsv").write_text(
+            "status\tdevice\tscreen\tappearance\twant_w\twant_h\tgot_w\tgot_h\n"
+            # 真的装不下：要 1300，只给到 1030
+            "unreachable\ttall-tier\tcolumns\tlight\t2400\t1300\t2400\t1030\n"
+            # 装得下，却被登记成装不下——摆错屏的那一种
+            "unreachable\tfits-tier\tcolumns\tlight\t1700\t1010\t1700\t990\n"
+            # 后来拍成了：旧表里的豁免必须作废
+            "unreachable\tredeemed\tcolumns\tlight\t1700\t1010\t1700\t990\n"
+            "ok\tredeemed\tcolumns\tlight\t1700\t1010\t1700\t1010\n",
+            encoding="utf-8")
+        found = clamped_cells(shots)
+        good = ("tall-tier", "columns", "light") in found
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  记下  真的被钳矮的那一格")
+
+        good = ("redeemed", "columns", "light") not in found
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  作废  后来拍成了的那一格，"
+              f"旧表不再替它挡着")
+
+        # 硬件复核：屏高 1080 时，1010 那一档不许被豁免，1300 那一档可以。
+        room = 1080
+        fits = int("1010") > room
+        ok &= not fits
+        print(f"  {'PASS' if not fits else 'FAIL'}  拒绝  屏幕装得下却报"
+              f"「装不下」的档（1010pt vs 可用 {room}pt）")
+        tall = int("1300") > room
+        ok &= tall
+        print(f"  {'PASS' if tall else 'FAIL'}  放行  确实超过屏高的档"
+              f"（1300pt vs 可用 {room}pt）")
+
     print("\n自检通过——闸门确实在工作" if ok else "\n自检失败")
     return 0 if ok else 1
 
@@ -239,6 +356,10 @@ def main() -> int:
 
     shots = sorted(p for p in shots_dir.rglob("*.png"))
     total = len(devices) * len(names) * len(appearances)
+    # 本机屏幕装不下的那些档：登记表说被钳过，且硬件确实办不到。两条都要。
+    clamped = clamped_cells(shots_dir)
+    room_h = machine_screen_height(root) if clamped else None
+    beyond_hardware: list[str] = []
     missing: list[str] = []
     wrong_size: list[str] = []
     filled = 0
@@ -251,7 +372,15 @@ def main() -> int:
             for appearance in appearances:
                 found = cell_files(shots, device["name"], screen, appearance)
                 if not found:
-                    missing.append(f"{device['name']} × {screen} × {appearance}")
+                    key = (device["name"], screen, appearance)
+                    note = clamped.get(key)
+                    if (note is not None and room_h is not None
+                            and int(device["height"]) > room_h):
+                        beyond_hardware.append(
+                            f"{device['name']} × {screen} × {appearance}  {note}")
+                    else:
+                        missing.append(
+                            f"{device['name']} × {screen} × {appearance}")
                     continue
                 filled += 1
                 by_cell.setdefault((device["name"], screen), {})[appearance] = \
@@ -284,8 +413,10 @@ def main() -> int:
                                  f"（{' / '.join(sorted(shots_of))} 是同一张）")
 
     print(checked(total, "格（设备 × 画面 × 外观）",
-                  f"已填 {filled} · 缺 {len(missing)} · "
-                  f"目录里共 {len(shots)} 张 png"))
+                  f"已填 {filled} · 缺 {len(missing)}"
+                  + (f" · 本机屏幕装不下 {len(beyond_hardware)}"
+                     if beyond_hardware else "")
+                  + f" · 目录里共 {len(shots)} 张 png"))
     if total == 0:
         print("✗ 矩阵是空的——这不是通过，这是没检查。")
         return 1
@@ -313,13 +444,24 @@ def main() -> int:
             print(f"    {line}")
         print("  按错窗口尺寸截的图，证明的是另一台设备上的布局。")
         failed = True
+    if beyond_hardware:
+        tiers = sorted({line.split(" × ")[0] for line in beyond_hardware})
+        print(f"⚠ {len(beyond_hardware)} 格本机屏幕装不下，不计为缺："
+              f"{'、'.join(tiers)}")
+        for line in beyond_hardware[:3]:
+            print(f"    {line}")
+        print(f"  本机最高一块屏的可用高度是 {room_h}pt。这些档是负责人点名的"
+              f"目标设备，不是本机能做到的事——换一块更高的屏，或在别的机器上"
+              f"补拍，这几格就会重新变成「缺」。")
     if unmeasured:
         print(f"⚠ {unmeasured} 张量不到尺寸（sips 不可用？），"
               f"这一部分本次没查。")
 
     if failed:
         return 1
-    print(f"✓ {total} 格齐备，尺寸全部对得上")
+    print(f"✓ {total - len(beyond_hardware)} 格齐备，尺寸全部对得上"
+          + (f"（另 {len(beyond_hardware)} 格本机屏幕装不下）"
+             if beyond_hardware else ""))
     return 0
 
 

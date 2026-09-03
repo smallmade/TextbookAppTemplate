@@ -179,8 +179,29 @@ EngKit 会同时打破七个 App，而你不会知道是哪一次改动干的。
 | 工具 | 用途 |
 |---|---|
 | `tools/ledger/builds.md` | 构建号台账。**号只增不减**，投递前查 ASC 确认未占用 |
-| `tools/shots/capture_ios.sh` | 截图采集——**脚本驱动真实交互，不用运行时钩子** |
+| `tools/shots/shots_config.py` | 取证工具的**项目形状读取器**（ci.toml 的 `[shots]`）。`--describe` 看现状，`--self-test` 自检 |
+| `tools/shots/device_matrix.sh` | 设备矩阵一条命令跑完（Mac + iPad）。`--self-test` / `--dry-run` / `--mac-only` |
+| `tools/shots/matrix_mac.sh` | 矩阵 Mac 那一半：窗口点数逐档 × 全部画面 × 深浅色 |
+| `tools/shots/matrix_ipad.sh` | 矩阵 iPad 那一半：**每档新建专用模拟器**，不碰姊妹会话开着的那台 |
+| `tools/shots/matrix_common.sh` | 共用件：锁屏守卫、落地重签、画面清单、按标题切屏、产物登记 |
+| `tools/shots/matrix_report.py` | 登记表 → manifest.json 与评分表骨架（预填 `?`，不预填满分） |
+| `tools/shots/walkthrough_mac.sh` | 逐屏走查：每个画面一张 |
+| `tools/shots/capture_mac_asc_sizes.sh` | Mac 商店截图，按 ASC 接受的像素尺寸 |
+| `tools/shots/WindowID.swift` | 按 **pid** 取窗口 ID（`--pid`）。绝不按屏幕区域截图 |
+| `tools/shots/RoomiestScreen.swift` | 最宽裕那块屏的可用区——「够不着」与「摆错屏」得在量之前分开 |
+| `tools/shots/capture_ios.sh` | iOS 截图采集——**脚本驱动真实交互，不用运行时钩子** |
 | `tools/shots/resize_for_asc.py` | 按 ASC 实测尺寸转换（iPhone 1284×2778） |
+
+`tools/shots` 和 `tools/ci` 一样是**一份真身**，各项目以符号链接指过来。
+App 的形状（成品路径、进程名、画面清单的形状、AX 行路径、档位表）全部写在
+**项目自己的 `ci.toml` 的 `[shots]` 一节**，脚本里没有任何一款 App 的名字。
+
+> 两份脚本用**内容的不同**来表达**配置的不同**，正是工具链分叉的成因。
+> `run_all_local.sh` 曾写死 `--mine "Material Mechanics Calculator"`，热力学
+> 那一款跑起来时报的是别人那一格——**不会红，只会答错**。
+
+接一款新 App：`python3 tools/shots/shots_config.py --root <项目> --describe`
+把未声明的键补齐，然后 `bash tools/shots/device_matrix.sh --self-test --dry-run`。
 
 截图这条链路是重写过的。老路线是在 App 里留一个环境变量开关、启动时预设
 界面状态（PlotOne 的 `QAHooks` 就是这么来的）——那导致了 **Guideline 5.6
