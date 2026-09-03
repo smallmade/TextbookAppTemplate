@@ -26,6 +26,24 @@ if [ "${1-}" = "--identifiers-only" ]; then IDENTIFIERS_ONLY=1; shift; fi
 RED=$'\033[31m'; GREEN=$'\033[32m'; BOLD=$'\033[1m'; OFF=$'\033[0m'
 FAIL=0
 
+# 扫描目标不存在时【必须响】，不能报绿。
+#
+# grep 扫一个不存在的路径 = 零命中 = 「✓ 无教材标识」。闸门于是每次都通过，
+# 而它一个字节也没读过。这不是假设：run_all_local.sh 里写的是模板项目的路径
+# （swift/Sources/MechanicsOneApp），在任何一款【别的】App 上那个目录都不
+# 存在，这一步于是常绿至今。
+#
+# run_gates.sh 的抬头就写着「一道报告『零命中 ✓』而其实没有运行的闸门，比
+# 没有闸门更糟」。这里把那句话变成可执行的：路径错了就拒绝报告结果。
+MISSING=""
+for _t in "$@"; do [ -e "$_t" ] || MISSING="$MISSING $_t"; done
+if [ -n "$MISSING" ]; then
+    echo "${RED}${BOLD}闸门拒绝报告结果：以下扫描目标不存在${OFF}" >&2
+    for _t in $MISSING; do echo "      $_t" >&2; done
+    echo "      → 扫不存在的路径 = 零命中 = 假绿。请修正调用方写的路径。" >&2
+    exit 2
+fi
+
 # 教材作者姓氏 = 【从正典自动导出】 ∪ 一份跨项目防御名单。
 #
 # 手写名单会漂移，理由和「公开函数清单必须自动探索」是同一条：本项目的
@@ -63,6 +81,59 @@ PYEOF
 )"
     [ -n "$DERIVED" ] && AUTHORS="$AUTHORS|$DERIVED"
 fi
+
+# 书名 = 【只从正典导出】，没有防御名单。
+#
+# 只查作者姓氏会漏掉一整类泄漏：**书名本身**。AboutView 里那句
+# 「Structural mechanics, worked on the iPad.」在这道闸门下绿了很久——它一个
+# 作者名都没提，可 `Structural Mechanics` 正是某本受版权教材的书名整串。
+# check_manual_isolation.py 早就在导出书名，但它只扫 site/ 与两册手册；
+# **<Core>App 的源码没有任何一道闸门在看书名**，而 SwiftUI 的 Text() 字面量
+# 会原样进二进制。
+#
+# 三条限制与 check_manual_isolation.py 完全一致，缺一条闸门就会乱叫：
+#
+#   * **≥12 字符**。更短的书名多半只是普通词组。
+#   * **公有领域来源不算**。它们可以具名，而且应该具名。
+#   * **同一书名挂在两个以上作者名下 = 学科名，不是书名**。一个书名要能识别
+#     一本书，它得对应唯一一个作者；对应两个以上，它携带的识别信息就是零。
+#     实测：某项目三本书的 title 都是 `Mechanics of Materials`——那是课程名，
+#     首页那句「mechanics of materials, worked interactively」一本书也没指。
+#
+# 第三条挡不住的，正是这次出事的那一种：**单作者的书名恰好就是学科名**
+# （Durka 的 `Structural Mechanics`）。闸门会照报——它无从分辨，也不该猜。
+# 处置是【改词】，不是关闸门：把界面上那句改成 structural analysis，成本是
+# 一行；漏一次 5.6 是账号层判定。
+derive_titles() {                     # $1 = 正典路径；输出 ERE 备选串
+    python3 - "$1" <<'PYEOF' 2>/dev/null || true
+import json, re, sys
+try:
+    sources = json.load(open(sys.argv[1], encoding="utf-8")).get("sources", [])
+except Exception:
+    sys.exit(0)
+by_title = {}
+for s in sources:                     # 歧义判定要看【全部】来源，不只受版权的
+    t = (s.get("title") or "").strip().lower()
+    if t:
+        by_title.setdefault(t, set()).add((s.get("author") or "").strip().lower())
+ambiguous = {t for t, a in by_title.items() if len(a) > 1}
+out = set()
+for s in sources:
+    if s.get("licence") != "copyrighted":
+        continue
+    t = (s.get("title") or "").strip()
+    if len(t) >= 12 and t.lower() not in ambiguous:
+        out.add(re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", t))   # ERE 转义
+print("|".join(sorted(out)))
+PYEOF
+}
+TITLES=""
+if [ -r spec/specification.json ] && command -v python3 >/dev/null 2>&1; then
+    TITLES="$(derive_titles spec/specification.json)"
+fi
+IDENT_WORDS="$AUTHORS"
+[ -n "$TITLES" ] && IDENT_WORDS="$IDENT_WORDS|$TITLES"
+
 # 教材的编号体系。这些是「表达」，不是「事实」。
 NUMBERING='Eq\.[[:space:]]*[0-9]|Example[[:space:]]+[0-9]|Problem[[:space:]]+[0-9]|Table[[:space:]]+[0-9]+-|Figure[[:space:]]+[0-9]+-|§[[:space:]]*[0-9]'
 
@@ -80,13 +151,21 @@ NUMBERING='Eq\.[[:space:]]*[0-9]|Example[[:space:]]+[0-9]|Problem[[:space:]]+[0-
 SOURCE_EXT='(swift|py|sh|mjs|js|ts|c|h|m)'
 DROP_COMMENT="^[^:]*\.${SOURCE_EXT}:[0-9]+:[[:space:]]*(//|#|\*)"
 
-# 姓氏必须匹配【整词】，编号体系不必。合起来跑一次 grep 的话，`turns`
+# 姓氏与书名必须匹配【整词】，编号体系不必。合起来跑一次 grep 的话，`turns`
 # 会在每一句 "returns nan" 上命中——kernel 的文档字符串里有五十处。一个
 # 每次都红五十行的闸门，两天之内就会被人关掉，这比没有闸门更糟。
 scan_identifiers() {
-    { grep -rnwEiI "$AUTHORS"   "$@" 2>/dev/null
-      grep -rnEiI  "$NUMBERING" "$@" 2>/dev/null
+    { grep -rnwEiI "$IDENT_WORDS" "$@" 2>/dev/null
+      grep -rnEiI  "$NUMBERING"   "$@" 2>/dev/null
     } | sort -u -t: -k1,1 -k2,2n | grep -vE "$DROP_COMMENT" || true
+}
+
+# 自检要能拿【任意一份名单】跑完整管线，而不是只喂里面的 grep——那正是
+# 上一版过滤器坏了两年没被发现的原因。bash 的 local 是动态作用域，所以
+# 这里的赋值对 scan_identifiers 可见。
+scan_with_words() {                   # $1 = 名单；其余 = 目录
+    local IDENT_WORDS="$1"; shift
+    scan_identifiers "$@"
 }
 
 scan_constants() {
@@ -111,9 +190,30 @@ selftest() {
     printf 'let poissonRatio = 0.3333333\n'                   > "$T/const_violation.swift"
     printf 'let appVersion = 1.2345\n    // scale factor 0.123456\n' > "$T/const_clean.swift"
 
-    local ident const rc=0
+    # 书名样本用一份【合成正典】导出，不用本项目的正典。理由与下面那条
+    # 「导出有没有发生」完全相同：写死本项目的书名，换一个项目自检立刻失败，
+    # 而它报告的是「闸门自身不可信」——于是整道闸门被拒绝执行。
+    #
+    # 合成正典同时覆盖四条判据，其中【三条是防止乱叫的】。一道只测「抓得到」
+    # 的自检会诱使人把名单越放越宽，直到闸门每次红一片然后被关掉。
+    cat > "$T/spec.json" <<'JSONEOF'
+{"sources": [
+  {"key": "cw-long",   "licence": "copyrighted",   "author": "Q. Exampleson",   "title": "Zylonic Beam Theory"},
+  {"key": "cw-short",  "licence": "copyrighted",   "author": "R. Otherperson",  "title": "Short Bk"},
+  {"key": "cw-share1", "licence": "copyrighted",   "author": "S. Thirdperson",  "title": "Shared Discipline Name"},
+  {"key": "cw-share2", "licence": "copyrighted",   "author": "T. Fourthperson", "title": "Shared Discipline Name"},
+  {"key": "pd-open",   "licence": "public-domain", "author": "U. Fifthperson",  "title": "Public Domain Handbook"}
+]}
+JSONEOF
+    printf 'let s = "Zylonic Beam Theory, worked interactively"\n'    > "$T/title_violation.swift"
+    printf 'let s = "shared discipline name, worked interactively"\n' > "$T/title_ok.swift"
+
+    local ident const titles tident rc=0
     ident="$(scan_identifiers "$T")"
     const="$(scan_constants "$T")"
+    titles="$(derive_titles "$T/spec.json")"
+    # 名单为空时 grep 的空模式匹配一切，会让下面那条「抓得到」的断言假绿。
+    tident="$(scan_with_words "${titles:-__no_titles_derived__}" "$T")"
     rm -rf "$T"
 
     grep -q 'code_violation'  <<<"$ident" || { echo "${RED}自检失败：源码里的真违规没被抓到${OFF}" >&2; rc=1; }
@@ -135,6 +235,13 @@ selftest() {
         [ -n "$DERIVED" ] || {
             echo "${RED}自检失败：正典存在但没导出任何作者——名单退回了防御表${OFF}" >&2; rc=1; }
     fi
+    # ── 书名：一条「抓得到」，三条「不乱叫」，外加一条完整管线 ──────────
+    grep -q 'Zylonic Beam Theory'    <<<"$titles" || { echo "${RED}自检失败：书名没有从正典导出——<Core>App 里的书名泄漏会全部漏过${OFF}" >&2; rc=1; }
+    grep -q 'Short Bk'               <<<"$titles" && { echo "${RED}自检失败：12 字符以下的书名进了名单——普通词组会被当成书名${OFF}" >&2; rc=1; }
+    grep -q 'Shared Discipline Name' <<<"$titles" && { echo "${RED}自检失败：同一书名挂在两个作者名下 = 学科名，不该进名单${OFF}" >&2; rc=1; }
+    grep -q 'Public Domain Handbook' <<<"$titles" && { echo "${RED}自检失败：公有领域来源进了名单——它们可以具名，而且应该具名${OFF}" >&2; rc=1; }
+    grep -q 'title_violation'        <<<"$tident" || { echo "${RED}自检失败：书名在【完整管线】里没被抓到——导出对了，管线没接上${OFF}" >&2; rc=1; }
+    grep -q 'title_ok'               <<<"$tident" && { echo "${RED}自检失败：学科名被误判成书名${OFF}" >&2; rc=1; }
     grep -q 'const_violation' <<<"$const" || { echo "${RED}自检失败：界面常数没被抓到${OFF}" >&2; rc=1; }
     grep -q 'const_clean'     <<<"$const" && { echo "${RED}自检失败：版本号或注释被当成物理常数${OFF}" >&2; rc=1; }
     return $rc
