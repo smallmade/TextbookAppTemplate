@@ -134,6 +134,37 @@ need() {
     fi
 }
 
+# only_if <名称> <这道闸门赖以存在的产物…> -- <命令…>
+#
+# 有些闸门赖的不是 ci.toml 里的一把键，而是【只有某一款 App 才有的产物】：
+# 一份 JS 实现、一个桌面打包 Gate 09、一份 design/prototype.html——四款里只有
+# 一款有。无条件跑它们，在另外三款上就是三盏永远的红，而**一盏恒红的灯和一盏
+# 恒绿的灯一样没有信息量**，两者都会在两周内被当成背景噪音然后没人再看。
+#
+# 与 need() 的分工，两者不可互换：
+#   · need    管「本该有却没配」——缺了是【未通过】，看日志的人要去补 ci.toml；
+#   · only_if 管「本来就不是每款都有」——没有是【不适用】，没有人要做什么。
+# 把后者写成 need，等于要求每款 App 都长成 MechanicsOne 的样子。
+#
+# `--` 的纪律与 need 一致，理由也一致：漏了它 "$@" 会是空的，而 `if "$@"` 对
+# 空参数返回 0 —— 一道什么都没跑的闸门报 ✓，正是这个文件通篇在防的事。
+only_if() {
+    local name="$1"; shift
+    local gone="" saw=""
+    while [ $# -gt 0 ]; do
+        if [ "$1" = "--" ]; then saw=yes; shift; break; fi
+        [ -e "$1" ] || gone="$gone $1"
+        shift
+    done
+    if [ -z "$saw" ] || [ $# -eq 0 ]; then
+        missing "$name" "only_if 用法错：少了 -- 或它后面的命令（脚本自己的错，不是项目的）"
+    elif [ -n "$gone" ]; then
+        pending "$name" "本项目没有${gone# } —— 这道闸门只对有它的项目适用"
+    else
+        step "$name" "$@"
+    fi
+}
+
 step "施工书闸门自检（必须能抓到八个已知不合格台账）" \
      python3 tools/ci/check_plan.py --self-test
 step "施工书台账（done 项的闸门必须存在且被调用）" \
@@ -203,7 +234,8 @@ step "Gate 02 · 七条充分性判据（对着正典核对真实存在的 fixtu
 need "Gate 02 · 输入格式矩阵（含读取器实测）" tests_dir -- \
      python3 tools/ci/check_input_matrix.py "$PYDIR" \
        --reader "python3 tools/conformance/read_matrix.py {file}" --expect-rows 6
-step "跨实现比对 · JS ↔ Python" node tools/conformance/check_js.mjs
+only_if "跨实现比对 · JS ↔ Python" tools/conformance/check_js.mjs -- \
+        node tools/conformance/check_js.mjs
 need "Gate 01+ · 正典 function 指针可解析" canon python_src_dir -- \
      python3 tools/ci/check_canon_functions.py "$CI_CANON" --python "$CI_PYTHON_SRC_DIR"
 
@@ -244,8 +276,8 @@ elif [ "$CODE" -ne 0 ]; then
 fi
 echo
 
-step "Gate 09 · 桌面打包（冒烟 + 图元 + 打包脚本一致）" \
-     bash tools/build/run_gate_09.sh
+only_if "Gate 09 · 桌面打包（冒烟 + 图元 + 打包脚本一致）" tools/build/run_gate_09.sh -- \
+        bash tools/build/run_gate_09.sh
 
 step "Gate 07 · 双手册与站点（生成 + 自洽 + 文案）" \
      bash tools/ci/run_gate_07.sh
@@ -277,7 +309,8 @@ need "Gate 05 · 参考值与扫描 fixture 是最新的" python_src_dir -- \
 # 本身：**被文档写成闸门的那一个，就该是真的在跑的那一个。**
 gate "Gate 05 · 跨语言 conformance · Swift ↔ Python（含正典指纹）" \
      bash tools/ci/check_conformance.sh .
-step "原型与共享模块同步" bash -c "python3 tools/conformance/build_prototype.py >/dev/null && git diff --quiet design/prototype.html 2>/dev/null || true"
+only_if "原型与共享模块同步" tools/conformance/build_prototype.py design/prototype.html -- \
+        bash -c "python3 tools/conformance/build_prototype.py >/dev/null && git diff --quiet design/prototype.html 2>/dev/null || true"
 
 # [2026-09-01] check_site.py 曾经在没给 --slug 时默认落到另一个姊妹项目的
 # slug（"structuremechone"）——本地全绿，末尾印出的五个 URL 却指向别人的站点。
