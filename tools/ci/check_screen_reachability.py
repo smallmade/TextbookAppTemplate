@@ -93,6 +93,11 @@ DECLARATION = re.compile(r"\b(?:func|var|let)\s+([A-Za-z_][A-Za-z0-9_]*)")
 BOUNDARY = re.compile(r"\b(?:func|var|let|init|subscript|enum|struct|class"
                       r"|extension|protocol|actor)\b")
 IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+#: A real assignment, not ``==`` / ``!=`` / ``<=`` / ``>=``. Used to find where
+#: a stored property's initialiser begins, so the ``[`` that opens a **type
+#: annotation** (``let cases: [Case] = [...]``) is not mistaken for the one
+#: that opens the value.
+ASSIGN = re.compile(r"(?<![=!<>])=(?!=)")
 
 
 def swiftify(snake: str) -> str:
@@ -156,14 +161,40 @@ def bodies(text: str) -> dict[str, str]:
     for match in DECLARATION.finditer(text):
         following = BOUNDARY.search(text, match.end())
         limit = following.start() if following else len(text)
-        start = text.find("{", match.end(), limit)
-        if start < 0 or "}" in text[match.end():start]:
-            continue
+        brace = text.find("{", match.end(), limit)
+        if brace >= 0 and "}" not in text[match.end():brace]:
+            start, opener, closer = brace, "{", "}"
+        else:
+            # [S-A8] A stored property can own a **bracket** body instead of a
+            # brace one, and a function table is exactly that:
+            #
+            #     static let effectiveFactors: [(String, () -> Double)] = [
+            #         ("pinned-pinned", StabilityKernel.effectiveFactorPinnedPinned),
+            #     ]
+            #
+            # Brace matching alone finds no `{` before the next declaration, so
+            # the whole entry was skipped and every routine named only in such a
+            # table read as unreachable. On StructureMechOne that made
+            # `euler_column.K_eff` a **false red** -- the screen does reach it,
+            # through the table -- and a false red is not harmless: the printed
+            # remedy is "write a ui_deferred", so it drives someone to record an
+            # excuse for a gap that does not exist, and the gate quietly starts
+            # meaning less.
+            #
+            # The initialiser is looked for after the assignment, because the
+            # type annotation owns a `[` of its own and it comes first.
+            assign = ASSIGN.search(text, match.end(), limit)
+            if assign is None or "}" in text[match.end():assign.start()]:
+                continue
+            start = text.find("[", assign.end(), limit)
+            if start < 0 or "}" in text[assign.end():start]:
+                continue
+            opener, closer = "[", "]"
         depth, index = 0, start
         while index < len(text):
-            if text[index] == "{":
+            if text[index] == opener:
                 depth += 1
-            elif text[index] == "}":
+            elif text[index] == closer:
                 depth -= 1
                 if depth == 0:
                     break
@@ -365,6 +396,34 @@ def self_test() -> int:
     good = "buried" not in reachable(["Pair(right: 1)"], kit3)
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  不可达  存储属性不认领下一个类型的体")
+
+    # [S-A8] 【已知会失败的样本】——函数表。一个只在存储属性的方括号初始化器里
+    # 被点名的函数，必须算可达；表里没点名的，仍然不可达。修好之前，整条声明
+    # 因为找不到 `{` 而被跳过，表里每个函数都读作「界面上到不了」。
+    table_kit = ["enum Table { static let cases: [() -> Double] = [Kit.viaTable]\n"
+                 "  static func unrelated() -> Double { 0 } }\n"
+                 "enum Kit { static func viaTable() -> Double { deepInTable() }\n"
+                 "  static func deepInTable() -> Double { 1 } }"]
+    through = reachable(["Table.cases"], table_kit)
+    good = "viaTable" in through
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  可达  只在函数表里被点名的函数")
+    good = "deepInTable" in through
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  可达  再经由表里那个函数往下一层")
+    good = "unrelated" not in through
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  不可达  同一类型里表没点名的函数")
+
+    # 类型注解自己带一个 `[`，而且排在初始化器前面。取错那一个，取到的是
+    # 「Case」而不是表的内容，于是这个修复看着通过、实际什么也没接上。
+    annotated = reachable(["Holder.list"], [
+        "enum Holder { static let list: [Recipe] = [Kit.wanted]\n"
+        "  static func skipped() -> Double { 0 } }\n"
+        "enum Kit { static func wanted() -> Double { 2 } }"])
+    good = "wanted" in annotated and "Recipe" not in annotated
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  取值  初始化器的方括号，不是类型注解的")
 
     # [A-12] A known-exempt pair must be filtered out; an unlisted symbol in
     # the same module must survive, so a real new gap cannot hide beside a
