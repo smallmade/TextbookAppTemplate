@@ -101,6 +101,32 @@ def swiftify(snake: str) -> str:
     return head + "".join(word.capitalize() for word in rest)
 
 
+def reachable_by_name(candidate: str, seen: set[str]) -> bool:
+    """Is the transliterated name among the ones the screens actually call?
+
+    Compared **case-insensitively**, because the rule above cannot produce the
+    spelling a Swift author uses for an abbreviation: ``inertia_xy_polygon``
+    transliterates to ``inertiaXyPolygon`` while the function is really called
+    ``inertiaXYPolygon``, and ``shear_stress_vqit`` to ``shearStressVqit``
+    against a real ``shearStressVQIT``.
+
+    Those two were reported as *unreachable outputs on a shipping screen* in
+    StructureMechOne -- one of the most serious verdicts this suite can hand
+    down -- while the screens had been drawing them all along. One sister
+    project has thirteen functions spelled this way (UDL, 2D, 3D, XY, VQIT).
+
+    The fix is here rather than in the source: renaming would split
+    ``inertiaXPolygon`` / ``inertiaYPolygon`` / ``inertiaXYPolygon`` apart and
+    leave the same trap set for the other eleven. `check_port_coverage.py`,
+    the sister gate in this directory, reached the same conclusion earlier and
+    already compares this way -- this one simply had not been told.
+
+    **A gate that cries wolf gets switched off within two days**, and the cost
+    of that is every real defect it would have caught afterwards.
+    """
+    return candidate.casefold() in {name.casefold() for name in seen}
+
+
 def without_comments(text: str) -> str:
     return COMMENT_LINE.sub(" ", COMMENT_BLOCK.sub(" ", text))
 
@@ -193,9 +219,9 @@ def classify(spec: dict, seen: set[str],
         if not outputs:
             continue
         arrived = [s for s, f in outputs
-                   if swiftify(f.rsplit(".", 1)[-1]) in seen]
+                   if reachable_by_name(swiftify(f.rsplit(".", 1)[-1]), seen)]
         missing = [s for s, f in outputs
-                   if swiftify(f.rsplit(".", 1)[-1]) not in seen]
+                   if not reachable_by_name(swiftify(f.rsplit(".", 1)[-1]), seen)]
         rows.append((module["id"], module["title"], arrived, missing))
     return rows
 
