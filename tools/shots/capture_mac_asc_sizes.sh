@@ -101,7 +101,7 @@ for entry in $WANT_IDS; do
     # 每一屏都从第 1 行重扫：asc_screens 的顺序不必是侧栏顺序。
     MATRIX_ROW=1
     if ! matrix::select_screen "$PROC" "$ROWPATH" "$WANT_TITLE" "$N_ROWS"; then
-        echo "✗ $id：扫到第 $N_ROWS 行也没出现标题「$WANT_TITLE」。" >&2
+        echo "✗ ${id}：扫到第 $N_ROWS 行也没出现标题「${WANT_TITLE}」。" >&2
         exit 1
     fi
 
@@ -111,7 +111,7 @@ for entry in $WANT_IDS; do
     ACTUAL="$(sips -g pixelWidth -g pixelHeight "$OUTFILE" 2>/dev/null \
         | awk '/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{print w"x"h}' || true)"
     if [ "$ACTUAL" != "$SIZE" ]; then
-        echo "✗ $id：要求 $SIZE，实测 $ACTUAL" >&2
+        echo "✗ ${id}：要求 ${SIZE}，实测 $ACTUAL" >&2
         exit 1
     fi
     printf "   %-28s %s  ✓\n" "$MATRIX_TITLE" "$ACTUAL"

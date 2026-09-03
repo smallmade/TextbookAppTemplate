@@ -162,7 +162,7 @@ else
 fi
 
 echo
-echo "CHECKED n=$SEEN_TOTAL unit=个 .py  —— 本次检查了 $SEEN_TOTAL 个 .py（kernel $SEEN_KERNEL · 四层 $SEEN_LAYERS · ui $SEEN_UI）"
+echo "CHECKED n=$SEEN_TOTAL unit=个 .py  —— 本次检查了 $SEEN_TOTAL 个 .py（kernel $SEEN_KERNEL · 四层 $SEEN_LAYERS · ui ${SEEN_UI}）"
 if [ "$SEEN_TOTAL" -eq 0 ]; then
     echo "  ${RED}✗${OFF} 五层目录一个 .py 都没有——报「干净」等于报「没检查」"
     # 最常见的成因，点名说出来，省掉一轮排查：`pip install -e` 会在 src/ 下

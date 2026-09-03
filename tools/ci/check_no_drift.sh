@@ -90,7 +90,7 @@ for d in "$ROOT"/*/; do
             echo "        与真身相差 $diffs 处。有意分叉 ≠ 可以永远不同步——"
             echo "        真身改动后要在那边同步一次：diff -r '$want' '$target'"
         elif [ -n "$MINE" ] && [ "$name" != "$MINE" ]; then
-            echo "  ${YELLOW}−${OFF} $name  链接指向别处：$target（别的项目，仅情报）"
+            echo "  ${YELLOW}−${OFF} $name  链接指向别处：${target}（别的项目，仅情报）"
         else
             echo "  ${RED}✗${OFF} $name  链接指向别处：$target"
             echo "        没有人声明过这是有意的。有意就在 $name/ci.toml 里写"

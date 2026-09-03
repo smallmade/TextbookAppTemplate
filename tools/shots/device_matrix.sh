@@ -147,9 +147,9 @@ if [ "$N_SCREENS" -eq 0 ] || { [ "$N_MAC" -eq 0 ] && [ "$N_IPAD" -eq 0 ]; } \
 fi
 
 echo "══ 设备矩阵 ══"
-echo "  档位     Mac $N_MAC · iPad $N_IPAD（读 $SHOTS_DEVICES_FROM）"
-echo "  画面     $N_SCREENS（screens_kind = $SHOTS_SCREENS_KIND）"
-echo "  外观     $N_APP（$SHOTS_APPEARANCES）"
+echo "  档位     Mac $N_MAC · iPad ${N_IPAD}（读 ${SHOTS_DEVICES_FROM}）"
+echo "  画面     ${N_SCREENS}（screens_kind = ${SHOTS_SCREENS_KIND}）"
+echo "  外观     ${N_APP}（${SHOTS_APPEARANCES}）"
 echo "  合计     $(( (N_MAC + N_IPAD) * N_SCREENS * N_APP )) 格"
 echo "  产物     $OUT"
 

@@ -118,7 +118,7 @@ source_selftest() {
     grep -rnE "$S3_PATTERN" "$T/bad3.swift" >/dev/null 2>&1 || { echo "自检失败：S-3 漏了真违规" >&2; rc=1; }
     for good in ok1 ok2 ok3; do
         if grep -rnE "$S1_PATTERN|$S2_PATTERN|$S3_PATTERN" "$T/$good.swift" >/dev/null 2>&1; then
-            echo "自检失败：合规代码被误判（$good）——闸门会因此被关掉" >&2; rc=1
+            echo "自检失败：合规代码被误判（${good}）——闸门会因此被关掉" >&2; rc=1
         fi
     done
     rm -rf "$T"
@@ -323,7 +323,7 @@ else
             if [ -n "$BID" ] && echo "$ENT" | grep -q "$BID"; then
                 pass "identifier 已签进，且指向 $BID"
             else
-                fail "identifier 已签进，但不指向本 bundle id（$BID）"
+                fail "identifier 已签进，但不指向本 bundle id（${BID}）"
             fi
         else
             fail "内嵌了描述文件却没把 application-identifier 签进去 —— 这就是 90886"

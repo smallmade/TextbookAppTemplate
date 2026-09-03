@@ -161,7 +161,7 @@ sim_rotate_to() {   # <udid> <portrait|landscape> <want_w> <want_h> <设备名>
         sim_ax "click menu item \"Rotate Left\" of menu 1 of menu bar item \"Device\" of menu bar 1" >/dev/null
         sleep 2
     done
-    echo "   ✗ 转不到 $want（要 ${w}×${h}pt）。Simulator.app 的 Device 菜单" >&2
+    echo "   ✗ 转不到 ${want}（要 ${w}×${h}pt）。Simulator.app 的 Device 菜单" >&2
     echo "     够不着——屏幕锁着，或者这一版 Xcode 的菜单项名字变了。" >&2
     return 1
 }
@@ -180,7 +180,7 @@ for DTYPE in "${TYPES[@]}"; do
         IFS=$'\t' read -r NAME _P _W _H DT _OR _SP MAN <<<"$line"
         [ "$DT" = "$DTYPE" ] || continue
         [ -z "$MAN" ] || { SKIPPED=$((SKIPPED+1))
-            echo "   ⏸ $NAME：分屏档，simctl 摆不出来，见 docs/device-matrix.md"
+            echo "   ⏸ ${NAME}：分屏档，simctl 摆不出来，见 docs/device-matrix.md"
             matrix::record manual "$NAME" "-" "-" "$_W" "$_H" "" "" "" \
                 "分屏要在 Simulator.app 里手工摆"; continue; }
         if [ -n "$ONLY_DEVICES" ] && [[ ",$ONLY_DEVICES," != *",$NAME,"* ]]; then
@@ -194,7 +194,7 @@ for DTYPE in "${TYPES[@]}"; do
     echo "══ 专用设备 $SIMNAME ══"
     UDID="$(xcrun simctl create "$SIMNAME" "$DTYPE" "$RUNTIME" 2>/dev/null)"
     if [ -z "$UDID" ]; then
-        echo "   ✗ 建不出这台设备（devicetype=$DTYPE runtime=$RUNTIME）" >&2
+        echo "   ✗ 建不出这台设备（devicetype=$DTYPE runtime=${RUNTIME}）" >&2
         FAILED=$((FAILED+1)); continue
     fi
     CREATED+=("$UDID")
@@ -221,13 +221,13 @@ for DTYPE in "${TYPES[@]}"; do
                         "$WANT_W" "$WANT_H" "" "" "" "转不到 $ORIENT"
                     FAILED=$((FAILED+1)); continue; }
             elif [ "$ORIENT" != "portrait" ]; then
-                echo "   ⏸ $NAME：--headless 转不了屏（simctl 无旋转能力）"
+                echo "   ⏸ ${NAME}：--headless 转不了屏（simctl 无旋转能力）"
                 matrix::record manual "$NAME" "-" "$APPEARANCE" \
                     "$WANT_W" "$WANT_H" "" "" "" "--headless 下无法旋转"
                 SKIPPED=$((SKIPPED+1)); continue
             fi
             xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || {
-                echo "   ✗ $NAME：App 起不来" >&2
+                echo "   ✗ ${NAME}：App 起不来" >&2
                 matrix::record launch-failed "$NAME" "-" "$APPEARANCE" \
                     "$WANT_W" "$WANT_H" "" "" "" "launch 失败"
                 FAILED=$((FAILED+1)); continue; }
@@ -242,7 +242,7 @@ for DTYPE in "${TYPES[@]}"; do
 
                 if [ "$i" -gt 1 ] || [ "$HEADLESS" = "0" ]; then
                     if [ "$HEADLESS" = "1" ]; then
-                        echo "   ⏸ $SID：--headless 切不了屏（simctl 无输入能力）"
+                        echo "   ⏸ ${SID}：--headless 切不了屏（simctl 无输入能力）"
                         matrix::record manual "$NAME" "$SID" "$APPEARANCE" \
                             "$WANT_W" "$WANT_H" "" "" "" "--headless 无法切屏"
                         SKIPPED=$((SKIPPED+1)); continue
@@ -250,12 +250,12 @@ for DTYPE in "${TYPES[@]}"; do
                     sim_focus_window "$SIMNAME" >/dev/null 2>&1 || true
                     OUT_AX="$(sim_click_named "$SIMNAME" "$TITLE")"
                     if [[ "$OUT_AX" == *"no-element"* || "$OUT_AX" == *"error"* ]]; then
-                        echo "   ✗ $SID：模拟器里点不到名为「$TITLE」的元素。" >&2
+                        echo "   ✗ ${SID}：模拟器里点不到名为「${TITLE}」的元素。" >&2
                         echo "     辅助功能桥够不着（屏幕锁着？Simulator 没窗口？）," >&2
                         echo "     或者侧栏行的可读名变了。看当前层级：" >&2
                         echo "     osascript -e 'tell application \"System Events\" to tell process \"Simulator\" to get entire contents of (first window whose name starts with \"$SIMNAME\")'" >&2
                         matrix::record switch-failed "$NAME" "$SID" "$APPEARANCE" \
-                            "$WANT_W" "$WANT_H" "" "" "" "点不到「$TITLE」"
+                            "$WANT_W" "$WANT_H" "" "" "" "点不到「${TITLE}」"
                         exit 1
                     fi
                     sleep 1.2
@@ -273,7 +273,7 @@ for DTYPE in "${TYPES[@]}"; do
                 # 这一张必须和上一张不同。iPad 没有窗口标题这种独立证据，
                 # 这一条是「18 张同一屏」唯一抓得住的地方。
                 if [ -n "$LAST_FILE" ] && matrix::same_image "$OUTFILE" "$LAST_FILE"; then
-                    echo "   ✗ $SID：这一张和上一屏【逐字节相同】——切换没生效。" >&2
+                    echo "   ✗ ${SID}：这一张和上一屏【逐字节相同】——切换没生效。" >&2
                     matrix::record switch-failed "$NAME" "$SID" "$APPEARANCE" \
                         "$WANT_W" "$WANT_H" "" "" "$OUTFILE" "与上一屏逐字节相同"
                     exit 1

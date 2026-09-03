@@ -54,7 +54,7 @@ for ENTRY in "${PATTERNS[@]}"; do
     HITS="$(grep -rnEI "$PATTERN" "$@" --include="*.swift" 2>/dev/null \
             | grep -vE ':[0-9]+:[[:space:]]*(//|\*)' || true)"
     if [ -n "$HITS" ]; then
-        echo "  ${RED}✗${OFF} $WHY："
+        echo "  ${RED}✗${OFF} ${WHY}："
         echo "$HITS" | sed 's/^/      /'
         FAIL=$((FAIL+1))
     fi
