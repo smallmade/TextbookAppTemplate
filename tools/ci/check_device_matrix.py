@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
@@ -100,6 +101,31 @@ DEVICES = [{"name": "ipad-pro-13-portrait", "width": 1032, "height": 1376},
            {"name": "mac-default-window", "width": 1280, "height": 800}]
 
 
+def _self_test_identical(root: Path) -> int:
+    """只跑「深浅色成对相同」那一条判据，供自检用。
+
+    单独写一个入口而不是调 run()：run() 还要读设备表、画面表与像素尺寸，
+    自检里把那些都造齐会让这一条的失败原因变得不确定——而自检的价值全在
+    「它红下来的原因是不是我想验的那一条」。
+    """
+    import hashlib as _h
+    shots = sorted((root / "shots").rglob("*.png"))
+    by_cell: dict[tuple[str, str], dict[str, Path]] = {}
+    for path in shots:
+        stem = path.stem.split("__")
+        if len(stem) != 3:
+            continue
+        by_cell.setdefault((stem[0], stem[1]), {})[stem[2]] = path
+    for (device_name, screen), shots_of in sorted(by_cell.items()):
+        if len(shots_of) < 2:
+            continue
+        digests = {_h.md5(p.read_bytes()).hexdigest() for p in shots_of.values()}
+        if len(digests) == 1:
+            print(f"✗ {device_name} × {screen} 的深色与浅色是同一张")
+            return 1
+    return 0
+
+
 def self_test() -> int:
     ok = True
     shots = [Path("2026-09-02/ipad-pro-13-portrait__columns__light.png"),
@@ -128,6 +154,33 @@ def self_test() -> int:
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  记录  子串匹配会把 -split 也算进"
           f"父设备（保守，宁可多算不漏格）")
+
+    # 深浅色是同一张时必须判红 —— 这一条是拿真图跑整道闸门，不是只测一个
+    # 辅助函数：漏掉它的那一版就是**辅助函数全对而整道闸门放行**。
+    import contextlib
+    import io
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "ci.toml").write_text(
+            'slug = "demo"\ndevice_matrix_dir = "shots"\n', encoding="utf-8")
+        (root / "shots" / "d").mkdir(parents=True)
+        # 最小的合法 PNG（1×1），两张字节完全相同。
+        blob = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+            "890000000a49444154789c6360000002000100ffff03000006000557bfabd400"
+            "00000049454e44ae426082")
+        for appearance in ("light", "dark"):
+            (root / "shots" / "d" /
+             f"probe-device__probe-screen__{appearance}.png").write_bytes(blob)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = _self_test_identical(root)
+        good = (code == 1) and "同一张" in buf.getvalue()
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  抓到  深色与浅色是同一张图")
+        if not good:
+            print("        " + buf.getvalue().replace("\n", "\n        "))
 
     good, why = size_ok((2064, 2752), DEVICES[0])
     ok &= good
@@ -190,6 +243,8 @@ def main() -> int:
     wrong_size: list[str] = []
     filled = 0
     unmeasured = 0
+    #: (device, screen) -> {appearance: 那一格的文件}，供深浅色成对比较。
+    by_cell: dict[tuple[str, str], dict[str, Path]] = {}
 
     for device in devices:
         for screen in names:
@@ -199,6 +254,8 @@ def main() -> int:
                     missing.append(f"{device['name']} × {screen} × {appearance}")
                     continue
                 filled += 1
+                by_cell.setdefault((device["name"], screen), {})[appearance] = \
+                    found[0]
                 measured = pixel_size(found[0])
                 if measured is None:
                     unmeasured += 1
@@ -207,6 +264,24 @@ def main() -> int:
                 if not good:
                     wrong_size.append(
                         f"{found[0].relative_to(shots_dir)}  {why}")
+
+    # 深色那一张与浅色那一张不许是同一张。
+    #
+    # 这道闸门原本只查文件名与像素尺寸，于是 MechanicsOne 的 72 对 Mac 截图
+    # **逐字节完全相同**而它报了 144 格 ok。成因在采集那一侧：用「删掉
+    # AppleInterfaceStyle 这个键」表示浅色，而那个键的含义是「跟随系统」，
+    # 这台机器的系统本身就是深色。于是浅色一格证据都没有，看起来却是满的。
+    #
+    # 同一天的 iPad 那 4 对是真的不同——所以这不是「深浅色本来就长一样」。
+    identical: list[str] = []
+    if len(appearances) > 1:
+        for (device_name, screen), shots_of in sorted(by_cell.items()):
+            digests: dict[str, str] = {}
+            for appearance, path in shots_of.items():
+                digests[appearance] = hashlib.md5(path.read_bytes()).hexdigest()
+            if len(shots_of) > 1 and len(set(digests.values())) == 1:
+                identical.append(f"{device_name} × {screen}  "
+                                 f"（{' / '.join(sorted(shots_of))} 是同一张）")
 
     print(checked(total, "格（设备 × 画面 × 外观）",
                   f"已填 {filled} · 缺 {len(missing)} · "
@@ -222,6 +297,15 @@ def main() -> int:
             print(f"    {line}")
         if len(missing) > 25:
             print(f"    …… 另 {len(missing) - 25} 格")
+        failed = True
+    if identical:
+        print(f"✗ {len(identical)} 个格位的深色与浅色是**逐字节相同的同一张图**：")
+        for line in identical[:15]:
+            print(f"    {line}")
+        if len(identical) > 15:
+            print(f"    …… 另 {len(identical) - 15} 个")
+        print("  一格拍了两遍同一个外观，登记表上却是两格证据。"
+              "先修采集那一侧再重拍。")
         failed = True
     if wrong_size:
         print(f"✗ {len(wrong_size)} 张截图的尺寸不对：")
