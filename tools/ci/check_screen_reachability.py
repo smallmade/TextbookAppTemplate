@@ -226,6 +226,33 @@ def classify(spec: dict, seen: set[str],
     return rows
 
 
+def unpointered(spec: dict, upto: str = "v1.0") -> list[tuple[str, str, list[str]]]:
+    """本档里【正典没给 function 指针】的输出，按模块分组。
+
+    [S-03] `classify` 只用带指针的输出建 rows，并且在一个模块的输出一个指针
+    都没有时直接 `continue`。那样的模块于是哪个桶都不进——不是 `none`，不是
+    `partial`——连模块数都不算它。StructureMechOne 上 45 个 v1.0 模块里只有
+    4 个带指针（195 个输出里 25 个），闸门印「4 个模块、全部可达」退 0，
+    而 4/45 与 45/45 在日志里长得一模一样。
+
+    没有指针的输出，既不是「可达」也不是「不可达」，是**判不了**——而判不了
+    是红的，不是绿的。这正是本仓库反复写的那个形态：「没有人写的 fixture，
+    比较的是零」。
+
+    按输出（不是按模块）分组，所以一个模块里三个有指针、两个没有时，那两个
+    也不会藏在「这个模块判过了」后面。
+    """
+    blind = []
+    for module in spec["modules"]:
+        if not in_release(module, upto):
+            continue
+        missing = [o.get("symbol", "?") for o in module.get("outputs", [])
+                   if not o.get("function")]
+        if missing:
+            blind.append((module["id"], module.get("title", ""), missing))
+    return blind
+
+
 HEADER = """\
 # 每个 v1.0 模块的输出，界面上到不到得了 —— 【实测】，不是照正典抄的
 #
@@ -402,6 +429,43 @@ def self_test() -> int:
     ok &= good
     print(f"  {'PASS' if good else 'FAIL'}  放行  一个入口都没有的模块不由 ui_deferred 处理")
 
+    # [S-03] 【已知会失败的样本】——证明「判不了」真的会被抓到，而不是被跳过。
+    # 这一条是本闸门自己出过的事故：classify 用 `if not outputs: continue`
+    # 把「输出一个 function 指针都没有」的模块整个跳过，它们于是不进任何桶、
+    # 也不计入模块数，闸门印一个远小于本档的模块数然后退 0。
+    blind_spec = {"modules": [
+        {"id": "M01", "title": "有指针", "tier": "core", "release": "v1.0",
+         "outputs": [{"symbol": "a", "function": "kernel.a"}]},
+        {"id": "M02", "title": "全无指针", "tier": "core", "release": "v1.0",
+         "outputs": [{"symbol": "b", "function": ""}, {"symbol": "c"}]},
+        {"id": "M03", "title": "半数无指针", "tier": "core", "release": "v1.0",
+         "outputs": [{"symbol": "d", "function": "kernel.d"},
+                     {"symbol": "e", "function": ""}]},
+        {"id": "M04", "title": "下一档", "tier": "extended", "release": "v1.1",
+         "outputs": [{"symbol": "f", "function": ""}]},
+    ]}
+
+    good = unpointered(blind_spec, "v1.0") == [
+        ("M02", "全无指针", ["b", "c"]), ("M03", "半数无指针", ["e"])]
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  抓到  正典没给 function 指针的输出")
+
+    # 半数无指针的模块【同时】出现在 rows 里（它判得了一半）和 blind 里
+    # （另一半判不了）。少了后者，那个输出就藏在「这个模块判过了」后面。
+    good = [r[0] for r in classify(blind_spec, set(), "v1.0")] == ["M01", "M03"]
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  记录  classify 仍只判得动带指针的输出")
+
+    # 下一档的模块不提前算进本档的「判不了」，否则每个项目一上来就是红的。
+    good = [m for m, _, _ in unpointered(blind_spec, "v1.0")] == ["M02", "M03"]
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  不纳入  下一档模块不算本档判不了")
+
+    # 全部带指针时必须为空——否则这道新检查会把每个项目都判红。
+    good = unpointered({"modules": [blind_spec["modules"][0]]}, "v1.0") == []
+    ok &= good
+    print(f"  {'PASS' if good else 'FAIL'}  放行  指针齐全的模块不报告")
+
     print("\n自检通过——闸门确实在工作" if ok else "\n自检失败")
     return 0 if ok else 1
 
@@ -470,12 +534,21 @@ def main() -> int:
     # and catch any deferral that has quietly gone stale.
     held, real_partial, stale = split_deferred(real_partial, full_ids, deferred)
 
-    print(checked(len(rows), f"个 {args.release} 模块"))
-    if not rows:
+    # [S-03] 数的是【本档全部模块】，不是「classify 判得动的那几个」。旧版
+    # 这里印 len(rows)，而 rows 只收带 function 指针的模块——判不了的那些
+    # 连计数都进不去，于是「没数到」被印成了「都可达」。
+    in_release_modules = [m for m in spec["modules"]
+                          if in_release(m, args.release)]
+    blind = unpointered(spec, args.release)
+    print(checked(len(in_release_modules), f"个 {args.release} 模块",
+                  f"其中 {len(rows)} 个有 function 指针、判得了，"
+                  f"{len(blind)} 个有输出没有指针、判不了"))
+    if not in_release_modules:
         print(f"✗ {args.release} 一个模块都没数到——这不是「全部可达」，"
               f"这是没检查。")
         return 1
-    print(f"{args.release} 模块 {len(rows)} 个 · 全部输出可达 "
+    print(f"{args.release} 模块 {len(in_release_modules)} 个 · 判得了 {len(rows)}"
+          f" · 全部输出可达 "
           f"{len(rows) - len(none) - len(partial)} · 部分 {len(real_partial)}"
           + (f"（另 {len(partial) - len(real_partial)} 个模块的缺口已核实为"
              f"假阳性，见下）" if len(partial) > len(real_partial) else "")
@@ -523,6 +596,18 @@ def main() -> int:
             print(f"    {mid}  {title}  走不到：{', '.join(missing)}")
         print("  要么补上入口，要么在正典里为它写一行 ui_deferred 说明为什么。"
               "「以后再说」不写下来，就等于没有人记得。")
+        return 1
+    if blind:
+        n_out = sum(len(syms) for _, _, syms in blind)
+        print(f"\n✗ {len(blind)} 个 {args.release} 模块、共 {n_out} 个输出，"
+              f"正典没有给 function 指针——这道闸门判不了：")
+        for mid, title, syms in blind:
+            shown = ", ".join(syms[:6]) + (" …" if len(syms) > 6 else "")
+            print(f"    {mid}  {title[:34]:<34} 无指针：{shown}")
+        print("  「判不了」不是「通过」。没有指针，闸门就不知道该在 Swift 侧找"
+              "什么名字，于是这些模块一个桶也进不去、也不计入模块数。")
+        print("  补上正典 outputs[].function，或把这些模块移出本档"
+              "（release 标到更后面的档）。")
         return 1
     print(f"✓ 每个 {args.release} 模块的输出，界面上都到得了"
           + (f"（{len(held)} 个由正典明文推迟）" if held else ""))
