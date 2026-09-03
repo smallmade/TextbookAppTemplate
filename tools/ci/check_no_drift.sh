@@ -67,8 +67,104 @@ is_vendored_submodule() {
     grep -q "vendor/" "$dir/.gitmodules"
 }
 
+# 2026-09-03 加【单项目模式】。
+#
+# 这道闸门原本只有一种工作方式：站在 APP-Development 那一层，把各款 App 的
+# tools/ci 一格一格看过去。而 **CI 上根本没有那一层**——工作流只 checkout 本
+# 仓库加 submodule，`${ROOT}/TextbookAppTemplate/tools/ci` 不存在，于是它
+# `exit 2`；退出码 2 又没带「尚不适用」，runner 只能判未通过。一道在 CI 上
+# 永远红、而红的原因与它要查的事无关的闸门，两周之内会被人关掉。
+#
+# 这与同一轮修掉的 tools/icon 是同一个形状：**一个只在负责人那台机器上成立
+# 的仓库外路径**。修法也一样——真身在本项目内部就有一份，就是 submodule。
+#
+# 所以模板不在时不再直接死掉，改为只看自己这一格，判据换成在任何机器上都
+# 成立的那条：tools/ci 是符号链接（实体副本会静默过期），且解析得到、落在
+# **本项目内部**（CI 与全新 clone 上也到得了）。
+#
+# 树一级的视野一点没减：模板在时，下面那段循环一个字都没改——已用真实的
+# APP-Development 树对照过，改前改后输出逐字节相同。
+single_project() {
+    local dir here base nm target k fail=0
+    if [ -n "${MINE}" ] && [ -d "${ROOT}/${MINE}" ]; then
+        dir="${ROOT}/${MINE}"
+    else
+        dir="${ROOT}"
+    fi
+    here="$(cd -P "${dir}" 2>/dev/null && pwd -P)" || {
+        echo "  ${RED}✗${OFF} 进不去 ${dir}" >&2; return 1; }
+    base="$(basename "${here}")"
+
+    echo "  ${YELLOW}−${OFF} 树一级没有 ${TPL} —— 只看本项目这一格（${base}）"
+    echo "        CI 与全新 clone 上本来就只有本仓库加 submodule，那一层不存在。"
+
+    if [ ! -e "${here}/tools/ci" ] && [ ! -L "${here}/tools/ci" ]; then
+        echo "  ${RED}✗${OFF} 本项目没有 tools/ci —— 这不是「干净」，是没检查"
+        echo
+        echo "CHECKED n=0 unit=个项目的 tools/ci  —— 单项目模式，一格都没看到"
+        return 1
+    fi
+
+    if [ -L "${here}/tools/ci" ]; then
+        if target="$(cd -P "${here}/tools/ci" 2>/dev/null && pwd -P)"; then
+            case "${target}" in
+                "${here}"/*)
+                    echo "  ${GREEN}✓${OFF} tools/ci  → ${target#"${here}"/}（本项目内）" ;;
+                *)
+                    echo "  ${RED}✗${OFF} tools/ci  指到仓库外：${target}"
+                    echo "        仓库外的路径只在负责人那台机器上成立，CI 上它是悬空的。"
+                    echo "        改成指进本项目的 vendor/："
+                    echo "        ln -sfn ../vendor/textbook-app-template/tools/ci '${here}/tools/ci'"
+                    fail=1 ;;
+            esac
+        else
+            echo "  ${RED}✗${OFF} tools/ci  **悬空**：$(readlink "${here}/tools/ci")"
+            echo "        解析不到。本机能用往往只因为仓库外恰好躺着那个目录。"
+            fail=1
+        fi
+    else
+        k="$(ls "${here}/tools/ci" 2>/dev/null | grep -v __pycache__ | wc -l | tr -d ' ')"
+        if declared_submodule "${here}"; then
+            echo "  ${BLUE}⧉${OFF} tools/ci  【有意】持有实体副本（${k} 个文件）"
+        else
+            echo "  ${RED}✗${OFF} tools/ci  是【无意的实体副本】（${k} 个文件），不是链接"
+            echo "        副本会静默过期，也会让真改进沉淀不回模板。"
+            fail=1
+        fi
+    fi
+
+    # tools/ 下其余符号链接。**不是本闸门的判据**（判据是 tools/ci），但指到
+    # 仓库外或悬空的一律点名：tools/icon 就是这样悬空了好几天——本机恰好有
+    # 那个兄弟目录，CI 上没有，而在「全部闸门」被建包挡住的那几天里，没有
+    # 任何东西在看它。
+    for l in "${here}"/tools/*; do
+        [ -L "${l}" ] || continue
+        nm="tools/$(basename "${l}")"
+        [ "${nm}" = "tools/ci" ] && continue
+        if target="$(cd -P "${l}" 2>/dev/null && pwd -P)"; then
+            case "${target}" in
+                "${here}"/*)
+                    echo "  ${GREEN}✓${OFF} ${nm}  → ${target#"${here}"/}（本项目内）" ;;
+                *)
+                    echo "  ${YELLOW}−${OFF} ${nm}  指到仓库外：${target}"
+                    echo "        本机成立、CI 上悬空。不判本闸门未通过（判据是 tools/ci），"
+                    echo "        但它迟早会以「文件找不到」的形式咬人。" ;;
+            esac
+        else
+            echo "  ${YELLOW}−${OFF} ${nm}  **悬空**：$(readlink "${l}")"
+            echo "        同上：不判未通过，但 CI 上它到不了。"
+        fi
+    done
+
+    echo
+    echo "CHECKED n=1 unit=个项目的 tools/ci  —— 单项目模式（树一级没有模板），只看了本项目这一格"
+    [ "${fail}" -eq 0 ] && {
+        echo "${GREEN}${BOLD}本项目的工具链指向本项目内部的真身。${OFF}"; echo; return 0; }
+    echo "${RED}${BOLD}未通过：本项目的 tools/ci 到不了。${OFF}"; echo; return 1
+}
+
 echo; echo "${BOLD}工具链单一真身${OFF}"
-[ -d "$ROOT/$TPL" ] || { echo "  ${RED}✗${OFF} 找不到模板 $TPL" >&2; exit 2; }
+[ -d "${ROOT}/${TPL}" ] || { single_project; exit $?; }
 
 for d in "$ROOT"/*/; do
     name="$(basename "$d")"
