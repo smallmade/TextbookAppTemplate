@@ -1,0 +1,54 @@
+# [M-A21] A throwaway Xcode project, generated for one purpose: to run an
+# XCUITest that walks the iPad screens so the device matrix can be captured.
+#
+# Why a project at all, when this repository is deliberately SwiftPM-only:
+# XCUITest is the only scriptable way to drive the app, and a UI-testing bundle
+# is a product type SwiftPM cannot declare. So the project is *generated* into a
+# temporary directory, used, and thrown away -- nothing ships from it and
+# nothing has to be kept in step with Package.swift, because it does not build
+# the application at all.
+#
+# It builds only the test bundle. The app under test is the one the matrix has
+# already installed on the simulator, driven by bundle id, which is why there is
+# no application target here and no dependency on MechanicsKit.
+name: MatrixUITests
+options:
+  bundleIdPrefix: com.yudehai.matrix
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+targets:
+  MatrixUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [MatrixUITests]
+    info:
+      path: MatrixUITests/Info.plist
+    settings:
+      base:
+        # No host application: the test drives an already-installed app by
+        # bundle id, so it must not try to launch a target of its own.
+        TEST_TARGET_NAME: ""
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  MatrixUITests:
+    build:
+      targets:
+        MatrixUITests: [test]
+    test:
+      targets: [MatrixUITests]
+      # The screen list is baked into the scheme rather than passed as
+      # TEST_RUNNER_MATRIX_SCREENS on the xcodebuild command line: for a test
+      # bundle with no host application that build setting does not reach the
+      # runner's environment, which showed up as an empty list (and, because
+      # the test refuses to walk an empty list, as a loud failure rather than a
+      # green run over nothing).
+      #
+      # Baking it in costs nothing because this project is generated fresh for
+      # every capture run -- `__MATRIX_SCREENS__` is substituted by
+      # matrix_ipad.sh from the app's own ScreenSpec list, so there is still
+      # only one place the screens are declared.
+      environmentVariables:
+        MATRIX_SCREENS: "__MATRIX_SCREENS__"
+        MATRIX_ORIENTATION: "__MATRIX_ORIENTATION__"
+        MATRIX_BUNDLE_ID: "__MATRIX_BUNDLE_ID__"

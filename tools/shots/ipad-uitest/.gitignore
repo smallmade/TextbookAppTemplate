@@ -1,0 +1,5 @@
+# 生成物，不入库：工程与 spec 都是每次采集现做的（画面清单、朝向、bundle id
+# 都烧在里面），存一份进仓库只会和 RootView.swift 的真清单分叉。
+MatrixUITests.xcodeproj/
+project.generated.yml
+build/
