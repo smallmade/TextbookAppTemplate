@@ -218,6 +218,31 @@ DOORS = ("fileImporter", "NSOpenPanel", "DocumentGroup", "FileDocument",
          "UIDocumentPickerViewController")
 
 
+#: 只跑验证、不出货的目标，按目录名认。
+#:
+#: SwiftPM 的目标名从来不是光秃秃的 "Verify"，而是 <Kit>Verify——本文件开头
+#: 那行 --reader 示例写的就是 BeamKitVerify，四款 App 实际叫
+#: StructureKitVerify / MechanicsKitVerify / GasDynVerify / ThermoVerify。
+#: 而原先的判断是 ``"Verify" in path.parts``：元组的 in 是**逐段精确相等**，
+#: 不是子串。于是四款 App 一个都没被排除掉——**这个排除从来没有生效过**。
+#:
+#: 它至今没出事，只因为那些验证目标碰巧没用到 DOORS 里的任何字眼。哪天验证
+#: 目标为了读自己的 conformance fixture 用上 FileDocument，这道闸门就会把它
+#: 报成「用户塞得进文件的入口」，而那正是这段排除本来要挡掉的东西。
+VERIFICATION_ONLY = ("Verify", "Tests")
+
+
+def owning_target(path: Path, root: Path) -> str:
+    """``path`` 属于哪个 SwiftPM 目标——即 ``root`` 底下的第一层目录名。
+
+    按**目标**判定，不按任意路径段判定：``path.parts`` 的末尾是文件名，若改成
+    逐段子串匹配，一个出货文件只要叫 VerifyExport.swift 就会被悄悄跳过。闸门
+    宁可多叫一声，也不该静默放行。
+    """
+    rel = path.relative_to(root)
+    return rel.parts[0] if len(rel.parts) > 1 else ""
+
+
 def file_input_surface(project: Path) -> list[str]:
     """外部文件进得来的每一条路，量出来而不是记在心里。
 
@@ -230,7 +255,8 @@ def file_input_surface(project: Path) -> list[str]:
         if not root.is_dir():
             continue
         for path in root.rglob("*.swift"):
-            if "Verify" in path.parts or "Tests" in path.parts:
+            target = owning_target(path, root)
+            if any(mark in target for mark in VERIFICATION_ONLY):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             for door in DOORS:
